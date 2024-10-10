@@ -9,15 +9,15 @@
 	import TextBox from '$lib/shared/TextBox.svelte';
 	import Toggle from '$lib/shared/Toggle.svelte';
 	import { User } from '$lib/stores/user';
-	import { getContext, getContextStore } from '$lib/utils/context';
 	import { BranchController } from '$lib/vbranches/branchController';
 	import { VirtualBranch } from '$lib/vbranches/types';
+	import { getContext, getContextStore } from '@gitbutler/shared/context';
 	import Button from '@gitbutler/ui/Button.svelte';
 	import Modal from '@gitbutler/ui/Modal.svelte';
 	import Tooltip from '@gitbutler/ui/Tooltip.svelte';
 
 	interface Props {
-		contextMenuEl?: ContextMenu;
+		contextMenuEl?: ReturnType<typeof ContextMenu>;
 		target?: HTMLElement;
 		onCollapse: () => void;
 		onGenerateBranchName: () => void;
@@ -180,7 +180,6 @@
 
 <Modal
 	width="small"
-	title="Delete branch"
 	bind:this={deleteBranchModal}
 	onSubmit={async (close) => {
 		try {
@@ -193,10 +192,12 @@
 	}}
 >
 	{#snippet children(branch)}
-		Are you sure you want to delete <code class="code-string">{branch.name}</code>?
+		All changes will be lost for <strong>{branch.name}</strong>. Are you sure you want to continue?
 	{/snippet}
 	{#snippet controls(close)}
 		<Button style="ghost" outline onclick={close}>Cancel</Button>
-		<Button style="error" kind="solid" type="submit" loading={isDeleting}>Delete</Button>
+		<Button style="error" kind="solid" type="submit" loading={isDeleting}
+			>Unapply and drop changes</Button
+		>
 	{/snippet}
 </Modal>

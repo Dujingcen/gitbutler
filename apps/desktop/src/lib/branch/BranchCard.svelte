@@ -1,7 +1,5 @@
 <script lang="ts">
 	import BranchHeader from './BranchHeader.svelte';
-	import StackedBranchHeader from './StackedBranchHeader.svelte';
-	import EmptyStatePlaceholder from '../components/EmptyStatePlaceholder.svelte';
 	import PullRequestCard from '../pr/PullRequestCard.svelte';
 	import InfoMessage from '../shared/InfoMessage.svelte';
 	import { PromptService } from '$lib/ai/promptService';
@@ -13,7 +11,6 @@
 	import CommitDialog from '$lib/commit/CommitDialog.svelte';
 	import CommitList from '$lib/commit/CommitList.svelte';
 	import { projectAiGenEnabled } from '$lib/config/config';
-	import { stackingFeature } from '$lib/config/uiFeatureFlags';
 	import BranchFiles from '$lib/file/BranchFiles.svelte';
 	import { getGitHostChecksMonitor } from '$lib/gitHost/interface/gitHostChecksMonitor';
 	import { getGitHostListingService } from '$lib/gitHost/interface/gitHostListingService';
@@ -25,9 +22,7 @@
 	import { SETTINGS, type Settings } from '$lib/settings/userSettings';
 	import Resizer from '$lib/shared/Resizer.svelte';
 	import { User } from '$lib/stores/user';
-	import { getContext, getContextStore, getContextStoreBySymbol } from '$lib/utils/context';
 	import { BranchController } from '$lib/vbranches/branchController';
-	import { groupCommitsByRef } from '$lib/vbranches/commitGroups';
 	import {
 		getIntegratedCommits,
 		getLocalAndRemoteCommits,
@@ -36,7 +31,9 @@
 	} from '$lib/vbranches/contexts';
 	import { FileIdSelection } from '$lib/vbranches/fileIdSelection';
 	import { VirtualBranch } from '$lib/vbranches/types';
+	import { getContext, getContextStore, getContextStoreBySymbol } from '@gitbutler/shared/context';
 	import Button from '@gitbutler/ui/Button.svelte';
+	import EmptyStatePlaceholder from '@gitbutler/ui/EmptyStatePlaceholder.svelte';
 	import lscache from 'lscache';
 	import { onMount } from 'svelte';
 	import type { Writable } from 'svelte/store';
@@ -161,12 +158,12 @@
 					data-tauri-drag-region
 				>
 					<BranchHeader {isLaneCollapsed} onGenerateBranchName={generateBranchName} />
-					{#if !$stackingFeature && branch.upstream?.givenName}
+					{#if branch.upstream?.givenName}
 						<PullRequestCard upstreamName={branch.upstream.givenName} />
 					{/if}
-					<div class:card-no-stacking={!$stackingFeature} class:card-stacking={$stackingFeature}>
+					<div class="branch-card__files-wrapper">
 						{#if branch.files?.length > 0}
-							<div class="branch-card__files" class:card={$stackingFeature}>
+							<div class="branch-card__files">
 								<Dropzones>
 									<BranchFiles
 										isUnapplied={false}
@@ -201,28 +198,30 @@
 							</div>
 						{:else if branch.commits.length === 0}
 							<Dropzones>
-								<div class="new-branch" class:card={$stackingFeature}>
-									<EmptyStatePlaceholder image={laneNewSvg} width="11rem">
-										<svelte:fragment slot="title">This is a new branch</svelte:fragment>
-										<svelte:fragment slot="caption">
+								<div class="new-branch">
+									<EmptyStatePlaceholder image={laneNewSvg} width={180} bottomMargin={48}>
+										{#snippet title()}
+											This is a new branch
+										{/snippet}
+										{#snippet caption()}
 											You can drag and drop files or parts of files here.
-										</svelte:fragment>
+										{/snippet}
 									</EmptyStatePlaceholder>
 								</div>
 							</Dropzones>
 						{:else}
 							<Dropzones>
-								<div class="no-changes" class:card={$stackingFeature}>
-									<EmptyStatePlaceholder image={noChangesSvg} width="11rem" hasBottomMargin={false}>
-										<svelte:fragment slot="caption"
-											>No uncommitted changes on this branch</svelte:fragment
-										>
+								<div class="no-changes">
+									<EmptyStatePlaceholder image={noChangesSvg} width={180}>
+										{#snippet caption()}
+											No uncommitted changes on this branch
+										{/snippet}
 									</EmptyStatePlaceholder>
 								</div>
 							</Dropzones>
 						{/if}
 
-						{#snippet pushButton({disabled}: {disabled: boolean})}
+						{#snippet pushButton({ disabled }: { disabled: boolean })}
 							<Button
 								style="pop"
 								kind="solid"
@@ -237,42 +236,16 @@
 								{branch.requiresForce ? 'Force push' : 'Push'}
 							</Button>
 						{/snippet}
-						{#if $stackingFeature}
-							{@const groups = groupCommitsByRef(branch.commits)}
-							{#each groups as group (group.ref)}
-								<div class="commit-group">
-									{#if group.branchName}
-										<StackedBranchHeader upstreamName={group.branchName} />
-										<PullRequestCard upstreamName={group.branchName} />
-									{/if}
-									<CommitList
-										localCommits={group.localCommits}
-										localAndRemoteCommits={group.remoteCommits}
-										integratedCommits={group.integratedCommits}
-										remoteCommits={[]}
-										isUnapplied={false}
-										{localCommitsConflicted}
-										{localAndRemoteCommitsConflicted}
-									/>
-								</div>
-							{/each}
-						{:else}
-							<CommitList
-								localCommits={$localCommits}
-								localAndRemoteCommits={$localAndRemoteCommits}
-								integratedCommits={$integratedCommits}
-								remoteCommits={$remoteCommits}
-								isUnapplied={false}
-								{localCommitsConflicted}
-								{localAndRemoteCommitsConflicted}
-								{pushButton}
-							/>
-						{/if}
-						{#if $stackingFeature}
-							{@render pushButton({
-								disabled: localCommitsConflicted || localAndRemoteCommitsConflicted
-							})}
-						{/if}
+						<CommitList
+							localCommits={$localCommits}
+							localAndRemoteCommits={$localAndRemoteCommits}
+							integratedCommits={$integratedCommits}
+							remoteCommits={$remoteCommits}
+							isUnapplied={false}
+							{localCommitsConflicted}
+							{localAndRemoteCommitsConflicted}
+							{pushButton}
+						/>
 					</div>
 				</div>
 			</ScrollableContainer>
@@ -325,21 +298,6 @@
 		padding: 12px;
 	}
 
-	.card-no-stacking {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		border: 1px solid var(--clr-border-2);
-		border-radius: var(--radius-m);
-		background: var(--clr-bg-1);
-	}
-
-	.card-stacking {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-	}
-
 	.branch-card__files {
 		display: flex;
 		flex-direction: column;
@@ -351,6 +309,15 @@
 		display: flex;
 		flex-direction: column;
 		padding: 12px;
+	}
+
+	.branch-card__files-wrapper {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		border: 1px solid var(--clr-border-2);
+		border-radius: var(--radius-m);
+		background: var(--clr-bg-1);
 	}
 
 	.new-branch,
@@ -382,13 +349,5 @@
 		width: 1px;
 		height: 100%;
 		background-color: var(--clr-border-2);
-	}
-
-	.commit-group {
-		margin: 10px 0;
-		border: 1px solid var(--clr-border-2);
-		border-radius: var(--radius-m);
-		background: var(--clr-bg-1);
-		overflow: hidden;
 	}
 </style>

@@ -10,7 +10,7 @@
 	import Link from '$lib/shared/Link.svelte';
 	import TextBox from '$lib/shared/TextBox.svelte';
 	import Toggle from '$lib/shared/Toggle.svelte';
-	import { getContext } from '$lib/utils/context';
+	import { getContext } from '@gitbutler/shared/context';
 	import Button from '@gitbutler/ui/Button.svelte';
 	import { invoke } from '@tauri-apps/api/tauri';
 	import { onMount } from 'svelte';
@@ -50,12 +50,6 @@
 	let loading = true;
 	let signCheckResult = false;
 	let errorMessage = '';
-	let succeedingRebases = project.succeedingRebases;
-
-	$: {
-		project.succeedingRebases = succeedingRebases;
-		projectService.updateProject(project);
-	}
 
 	async function checkSigning() {
 		checked = true;

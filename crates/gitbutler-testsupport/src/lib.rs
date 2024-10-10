@@ -7,6 +7,8 @@ pub use test_project::TestProject;
 mod suite;
 pub use suite::*;
 
+pub mod testing_repository;
+
 pub mod paths {
     use tempfile::TempDir;
 
@@ -18,8 +20,8 @@ pub mod paths {
 }
 
 pub mod virtual_branches {
-    use gitbutler_branch::{Target, VirtualBranchesHandle};
     use gitbutler_command_context::CommandContext;
+    use gitbutler_stack::{Target, VirtualBranchesHandle};
 
     use crate::empty_bare_repository;
 

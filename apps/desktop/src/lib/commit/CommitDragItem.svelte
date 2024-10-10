@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { CommitDragActions, CommitDragActionsFactory } from '$lib/commits/dragActions';
+	import { stackingFeature } from '$lib/config/uiFeatureFlags';
 	import CardOverlay from '$lib/dropzone/CardOverlay.svelte';
 	import Dropzone from '$lib/dropzone/Dropzone.svelte';
-	import { getContext, maybeGetContextStore } from '$lib/utils/context';
 	import { Commit, VirtualBranch, DetailedCommit } from '$lib/vbranches/types';
+	import { getContext, maybeGetContextStore } from '@gitbutler/shared/context';
 	import type { Snippet } from 'svelte';
 
 	const commitDragActionsFactory = getContext(CommitDragActionsFactory);
@@ -40,9 +41,13 @@
 				{hovered}
 				{activated}
 				label="Amend commit"
-				extraPaddings={{
-					left: 4
-				}}
+				extraPaddings={$stackingFeature
+					? {
+							left: 4
+						}
+					: {
+							left: 4
+						}}
 			/>
 		{/snippet}
 	</Dropzone>
@@ -57,9 +62,13 @@
 				{hovered}
 				{activated}
 				label="Squash commit"
-				extraPaddings={{
-					left: 4
-				}}
+				extraPaddings={$stackingFeature
+					? {
+							left: -4
+						}
+					: {
+							left: 4
+						}}
 			/>
 		{/snippet}
 	</Dropzone>

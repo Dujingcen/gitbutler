@@ -7,8 +7,8 @@
 	import ScrollableContainer from '$lib/scroll/ScrollableContainer.svelte';
 	import { SETTINGS, type Settings } from '$lib/settings/userSettings';
 	import Resizer from '$lib/shared/Resizer.svelte';
-	import { getContext, getContextStoreBySymbol } from '$lib/utils/context';
 	import { FileIdSelection } from '$lib/vbranches/fileIdSelection';
+	import { getContext, getContextStoreBySymbol } from '@gitbutler/shared/context';
 	import lscache from 'lscache';
 	import { onMount, setContext } from 'svelte';
 	import { writable } from 'svelte/store';
@@ -24,14 +24,15 @@
 	const fileIdSelection = new FileIdSelection(project.id, writable([]));
 	setContext(FileIdSelection, fileIdSelection);
 
-	// eslint-disable-next-line svelte/valid-compile
-	$: selectedFile = fileIdSelection.selectedFile;
+	const selectedFile = fileIdSelection.selectedFile;
+
+	$: commitId = $selectedFile?.[0];
+	$: selected = $selectedFile?.[1];
 
 	let rsViewport: HTMLDivElement;
 	let laneWidth: number;
 
-	// eslint-disable-next-line svelte/valid-compile
-	$: error = baseBranchService.error;
+	const error = baseBranchService.error;
 
 	onMount(() => {
 		laneWidth = lscache.get(laneWidthKey);
@@ -65,20 +66,18 @@
 			/>
 		</div>
 		<div class="base__right">
-			{#await $selectedFile then [commitId, selected]}
-				{#if selected}
-					<FileCard
-						conflicted={selected.conflicted}
-						file={selected}
-						isUnapplied={false}
-						readonly={true}
-						{commitId}
-						on:close={() => {
-							fileIdSelection.clear();
-						}}
-					/>
-				{/if}
-			{/await}
+			{#if selected}
+				<FileCard
+					conflicted={selected.conflicted}
+					file={selected}
+					isUnapplied={false}
+					readonly={true}
+					{commitId}
+					on:close={() => {
+						fileIdSelection.clear();
+					}}
+				/>
+			{/if}
 		</div>
 	</div>
 {/if}

@@ -1,16 +1,16 @@
 <script lang="ts">
 	import MergeButton from './MergeButton.svelte';
-	import ViewPrButton from './ViewPrButton.svelte';
+	import PrDetailsModal from './PrDetailsModal.svelte';
 	import InfoMessage from '../shared/InfoMessage.svelte';
 	import { Project } from '$lib/backend/projects';
 	import { BaseBranchService } from '$lib/baseBranch/baseBranchService';
-	import { stackingFeature } from '$lib/config/uiFeatureFlags';
 	import { getGitHostChecksMonitor } from '$lib/gitHost/interface/gitHostChecksMonitor';
 	import { getGitHostListingService } from '$lib/gitHost/interface/gitHostListingService';
 	import { getGitHostPrService } from '$lib/gitHost/interface/gitHostPrService';
-	import { getContext } from '$lib/utils/context';
 	import * as toasts from '$lib/utils/toasts';
+	import { openExternalUrl } from '$lib/utils/url';
 	import { VirtualBranchService } from '$lib/vbranches/virtualBranch';
+	import { getContext } from '@gitbutler/shared/context';
 	import Button from '@gitbutler/ui/Button.svelte';
 	import { type ComponentColor } from '@gitbutler/ui/utils/colorTypes';
 	import { createTimeAgoStore } from '@gitbutler/ui/utils/timeAgo';
@@ -26,7 +26,7 @@
 
 	type StatusInfo = {
 		text: string;
-		icon: keyof typeof iconsJson | undefined;
+		icon?: keyof typeof iconsJson | undefined;
 		style?: ComponentColor;
 		messageStyle?: MessageStyle;
 	};
@@ -34,6 +34,8 @@
 	const vbranchService = getContext(VirtualBranchService);
 	const baseBranchService = getContext(BaseBranchService);
 	const project = getContext(Project);
+
+	let prDetailsModal = $state<ReturnType<typeof PrDetailsModal>>();
 
 	const gitHostListingService = getGitHostListingService();
 	const prStore = $derived($gitHostListingService?.prs);
@@ -91,36 +93,32 @@
 						? 'success-small'
 						: 'error-small'
 					: 'spinner';
-			const text = $checks.completed
-				? $checks.success
-					? 'Checks passed'
-					: 'Checks failed'
-				: getChecksCount($checks);
+			const text = $checks.completed ? 'Checks' : getChecksCount($checks);
 			return { style, icon, text };
 		}
 		if ($checksLoading) {
-			return { style: 'neutral', icon: 'spinner', text: ' Checks' };
+			return { style: 'neutral', icon: 'spinner', text: 'Checks' };
 		}
 	});
 
 	const prStatusInfo: StatusInfo = $derived.by(() => {
 		if (!$pr) {
-			return { text: 'Status', icon: 'spinner', style: 'neutral' };
+			return { text: 'Status', style: 'neutral' };
 		}
 
 		if ($pr?.mergedAt) {
-			return { text: 'Merged', icon: 'merged-pr-small', style: 'purple' };
+			return { text: 'Merged', style: 'purple' };
 		}
 
 		if ($pr?.closedAt) {
-			return { text: 'Closed', icon: 'closed-pr-small', style: 'error' };
+			return { text: 'Closed', style: 'error' };
 		}
 
 		if ($pr?.draft) {
-			return { text: 'Draft', icon: 'draft-pr-small', style: 'neutral' };
+			return { text: 'Draft', style: 'neutral' };
 		}
 
-		return { text: 'Open', icon: 'pr-small', style: 'success' };
+		return { text: 'Open', style: 'success' };
 	});
 
 	const infoProps: StatusInfo | undefined = $derived.by(() => {
@@ -174,38 +172,15 @@
 </script>
 
 {#if $pr}
-	<div
-		class:card={!$stackingFeature}
-		class:pr-card={!$stackingFeature}
-		class:stacked-pr={$stackingFeature}
-	>
-		<div class="floating-button">
-			<Button
-				icon="update-small"
-				size="tag"
-				style="ghost"
-				outline
-				loading={$mrLoading || $checksLoading}
-				tooltip={$timeAgo ? 'Updated ' + $timeAgo : ''}
-				onclick={async () => {
-					$checksMonitor?.update();
-					prMonitor?.refresh();
-				}}
-			/>
-		</div>
-		<div
-			class:pr-title={!$stackingFeature}
-			class:stacked-pr-title={$stackingFeature}
-			class="text-13 text-semibold"
-		>
+	<div class="card pr-card">
+		<div class="pr-title text-13 text-semibold">
 			<span style="color: var(--clr-scale-ntrl-50)">PR #{$pr?.number}:</span>
-			{$pr.title}
+			<span>{$pr.title}</span>
 		</div>
-		<div class:pr-tags={!$stackingFeature} class:stacked-pr-tags={$stackingFeature}>
+		<div class="pr-tags">
 			<Button
 				size="tag"
 				clickable={false}
-				icon={prStatusInfo.icon}
 				style={prStatusInfo.style}
 				kind={prStatusInfo.text !== 'Open' && prStatusInfo.text !== 'Status' ? 'solid' : 'soft'}
 			>
@@ -216,13 +191,45 @@
 					size="tag"
 					clickable={false}
 					icon={checksTagInfo.icon}
+					reversedDirection
 					style={checksTagInfo.style}
 					kind={checksTagInfo.icon === 'success-small' ? 'solid' : 'soft'}
 				>
 					{checksTagInfo.text}
 				</Button>
 			{/if}
-			<ViewPrButton url={$pr.htmlUrl} />
+			<Button
+				size="tag"
+				style="ghost"
+				outline
+				icon="description-small"
+				onclick={() => {
+					prDetailsModal?.show();
+				}}
+			>
+				PR details
+			</Button>
+			<Button
+				icon="open-link"
+				size="tag"
+				style="ghost"
+				outline
+				onclick={() => {
+					openExternalUrl($pr.htmlUrl);
+				}}
+			/>
+			<Button
+				icon="update-small"
+				size="tag"
+				style="ghost"
+				outline
+				loading={$mrLoading}
+				tooltip={$timeAgo ? 'Updated ' + $timeAgo : ''}
+				onclick={async () => {
+					$checksMonitor?.update();
+					prMonitor?.refresh();
+				}}
+			/>
 		</div>
 
 		<!--
@@ -234,7 +241,7 @@
         immediately.
         -->
 		{#if $pr}
-			<div class:pr-actions={!$stackingFeature} class:stacked-pr-actions={$stackingFeature}>
+			<div class="pr-actions">
 				{#if infoProps}
 					<InfoMessage icon={infoProps.icon} filled outlined={false} style={infoProps.messageStyle}>
 						<svelte:fragment slot="content">
@@ -278,13 +285,11 @@
 	</div>
 {/if}
 
-<style lang="postcss">
-	.stacked-pr {
-		position: relative;
-		display: flex;
-		flex-direction: column;
-	}
+{#if $pr}
+	<PrDetailsModal bind:this={prDetailsModal} type="display" pr={$pr} />
+{/if}
 
+<style lang="postcss">
 	.pr-card {
 		position: relative;
 		padding: 14px;
@@ -299,22 +304,9 @@
 		cursor: text;
 	}
 
-	.stacked-pr-title {
-		color: var(--clr-scale-ntrl-0);
-		padding: 14px 14px 12px 14px;
-		user-select: text;
-		cursor: text;
-	}
-
 	.pr-tags {
 		display: flex;
 		gap: 4px;
-	}
-
-	.stacked-pr-tags {
-		display: flex;
-		gap: 4px;
-		padding: 0 14px 12px 14px;
 	}
 
 	.pr-actions {
@@ -322,18 +314,5 @@
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
-	}
-
-	.stacked-pr-actions {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		padding: 0 14px 12px 14px;
-	}
-
-	.floating-button {
-		position: absolute;
-		right: 6px;
-		top: 6px;
 	}
 </style>

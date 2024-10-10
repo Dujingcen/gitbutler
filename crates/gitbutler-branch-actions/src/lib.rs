@@ -2,16 +2,16 @@
 mod actions;
 // This is our API
 pub use actions::{
-    amend, can_apply_remote_branch, create_change_reference, create_commit, create_virtual_branch,
-    create_virtual_branch_from_branch, delete_local_branch, fetch_from_remotes,
+    amend, can_apply_remote_branch, create_commit, create_virtual_branch,
+    create_virtual_branch_from_branch, delete_local_branch, fetch_from_remotes, find_commit,
     get_base_branch_data, get_remote_branch_data, get_uncommited_files,
     get_uncommited_files_reusable, insert_blank_commit, integrate_upstream,
     integrate_upstream_commits, list_local_branches, list_remote_commit_files,
     list_virtual_branches, list_virtual_branches_cached, move_commit, move_commit_file,
-    push_change_reference, push_virtual_branch, reorder_commit, reset_files, reset_virtual_branch,
-    save_and_unapply_virutal_branch, set_base_branch, set_target_push_remote, squash,
-    unapply_ownership, unapply_without_saving_virtual_branch, undo_commit, update_base_branch,
-    update_branch_order, update_change_reference, update_commit_message, update_virtual_branch,
+    push_base_branch, push_virtual_branch, reorder_commit, reset_files, reset_virtual_branch,
+    resolve_upstream_integration, save_and_unapply_virutal_branch, set_base_branch,
+    set_target_push_remote, squash, unapply_ownership, unapply_without_saving_virtual_branch,
+    undo_commit, update_branch_order, update_commit_message, update_virtual_branch,
     upstream_integration_statuses,
 };
 
@@ -20,6 +20,7 @@ pub use r#virtual::{BranchStatus, VirtualBranch, VirtualBranchHunksByPathMap, Vi
 /// Avoid using these!
 /// This was previously `pub use r#virtual::*;`
 pub mod internal {
+    pub use super::branch_upstream_integration;
     pub use super::r#virtual::*;
     pub use super::remote::list_local_branches;
 }
@@ -43,9 +44,15 @@ pub use remote::{RemoteBranch, RemoteBranchData, RemoteCommit};
 
 pub mod conflicts;
 
+pub mod branch_trees;
+pub mod branch_upstream_integration;
+mod move_commits;
+mod reorder_commits;
+mod undo_commit;
+
 mod author;
 mod status;
-use gitbutler_branch::VirtualBranchesHandle;
+use gitbutler_stack::VirtualBranchesHandle;
 pub use status::get_applied_status;
 trait VirtualBranchesExt {
     fn virtual_branches(&self) -> VirtualBranchesHandle;
@@ -67,3 +74,5 @@ pub use branch::{
 };
 
 pub use integration::GITBUTLER_WORKSPACE_COMMIT_TITLE;
+
+pub mod stack;

@@ -2,6 +2,7 @@
 	import BranchCard from './BranchCard.svelte';
 	import { Project } from '$lib/backend/projects';
 	import { projectLaneCollapsed } from '$lib/config/config';
+	import { stackingFeature } from '$lib/config/uiFeatureFlags';
 	import FileCard from '$lib/file/FileCard.svelte';
 	import { getGitHost } from '$lib/gitHost/interface/gitHost';
 	import { createGitHostChecksMonitorStore } from '$lib/gitHost/interface/gitHostChecksMonitor';
@@ -11,7 +12,7 @@
 	import { persisted } from '$lib/persisted/persisted';
 	import { SETTINGS, type Settings } from '$lib/settings/userSettings';
 	import Resizer from '$lib/shared/Resizer.svelte';
-	import { getContext, getContextStoreBySymbol, createContextStore } from '$lib/utils/context';
+	import Stack from '$lib/stack/Stack.svelte';
 	import {
 		createIntegratedCommitsContextStore,
 		createLocalCommitsContextStore,
@@ -21,6 +22,11 @@
 	import { FileIdSelection } from '$lib/vbranches/fileIdSelection';
 	import { SelectedOwnership } from '$lib/vbranches/ownership';
 	import { RemoteFile, VirtualBranch } from '$lib/vbranches/types';
+	import {
+		getContext,
+		getContextStoreBySymbol,
+		createContextStore
+	} from '@gitbutler/shared/context';
 	import lscache from 'lscache';
 	import { setContext } from 'svelte';
 	import { quintOut } from 'svelte/easing';
@@ -84,7 +90,9 @@
 
 	const project = getContext(Project);
 	const fileIdSelection = new FileIdSelection(project.id, branchFiles);
-	const selectedFile = $derived(fileIdSelection.selectedFile);
+	const selectedFile = fileIdSelection.selectedFile;
+	const commitId = $derived($selectedFile?.[0]);
+	const selected = $derived($selectedFile?.[1]);
 	setContext(FileIdSelection, fileIdSelection);
 
 	const userSettings = getContextStoreBySymbol<Settings>(SETTINGS);
@@ -107,41 +115,43 @@
 </script>
 
 <div class="wrapper" data-tauri-drag-region>
-	<BranchCard {commitBoxOpen} {isLaneCollapsed} />
+	{#if $stackingFeature}
+		<Stack {commitBoxOpen} {isLaneCollapsed} />
+	{:else}
+		<BranchCard {commitBoxOpen} {isLaneCollapsed} />
+	{/if}
 
-	{#await $selectedFile then [commitId, selected]}
-		{#if selected}
-			<div
-				class="file-preview"
-				bind:this={rsViewport}
-				in:slide={{ duration: 180, easing: quintOut, axis: 'x' }}
-				style:width={`${fileWidth || $defaultFileWidthRem}rem`}
-			>
-				<FileCard
-					isUnapplied={false}
-					conflicted={selected.conflicted}
-					file={selected}
-					readonly={selected instanceof RemoteFile}
-					selectable={$commitBoxOpen && commitId === undefined}
-					{commitId}
-					on:close={() => {
-						fileIdSelection.clear();
-					}}
-				/>
-				<Resizer
-					viewport={rsViewport}
-					direction="right"
-					minWidth={400}
-					defaultLineColor="var(--clr-border-2)"
-					on:width={(e) => {
-						fileWidth = e.detail / (16 * $userSettings.zoom);
-						lscache.set(fileWidthKey + branch.id, fileWidth, 7 * 1440); // 7 day ttl
-						$defaultFileWidthRem = fileWidth;
-					}}
-				/>
-			</div>
-		{/if}
-	{/await}
+	{#if selected}
+		<div
+			class="file-preview"
+			bind:this={rsViewport}
+			in:slide={{ duration: 180, easing: quintOut, axis: 'x' }}
+			style:width={`${fileWidth || $defaultFileWidthRem}rem`}
+		>
+			<FileCard
+				isUnapplied={false}
+				conflicted={selected.conflicted}
+				file={selected}
+				readonly={selected instanceof RemoteFile}
+				selectable={$commitBoxOpen && commitId === undefined}
+				{commitId}
+				on:close={() => {
+					fileIdSelection.clear();
+				}}
+			/>
+			<Resizer
+				viewport={rsViewport}
+				direction="right"
+				minWidth={400}
+				defaultLineColor="var(--clr-border-2)"
+				on:width={(e) => {
+					fileWidth = e.detail / (16 * $userSettings.zoom);
+					lscache.set(fileWidthKey + branch.id, fileWidth, 7 * 1440); // 7 day ttl
+					$defaultFileWidthRem = fileWidth;
+				}}
+			/>
+		</div>
+	{/if}
 </div>
 
 <style lang="postcss">

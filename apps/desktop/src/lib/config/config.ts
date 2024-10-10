@@ -5,11 +5,6 @@ export function projectHttpsWarningBannerDismissed(projectId: string): Persisted
 	return persisted(false, key + projectId);
 }
 
-export function projectMergeUpstreamWarningDismissed(projectId: string): Persisted<boolean> {
-	const key = 'projectMergeUpstreamWarningDismissed_';
-	return persisted(false, key + projectId);
-}
-
 export function projectCommitGenerationExtraConcise(projectId: string): Persisted<boolean> {
 	const key = 'projectCommitGenerationExtraConcise_';
 	return persisted(false, key + projectId);
@@ -49,3 +44,7 @@ export function projectLaneCollapsed(projectId: string, laneId: string): Persist
 export function persistedCommitMessage(projectId: string, branchId: string): Persisted<string> {
 	return persisted('', 'projectCurrentCommitMessage_' + projectId + '_' + branchId);
 }
+
+export const showStackingCardDetails = persisted(false, 'showStackingCardDetails');
+
+export const showHistoryView = persisted(false, 'showHistoryView');

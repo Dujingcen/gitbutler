@@ -1,19 +1,19 @@
 pub mod commands {
     use anyhow::{anyhow, Context};
-    use gitbutler_branch::{
-        BranchCreateRequest, BranchId, BranchOwnershipClaims, BranchUpdateRequest,
+    use gitbutler_branch::{BranchCreateRequest, BranchUpdateRequest};
+    use gitbutler_branch_actions::internal::PushResult;
+    use gitbutler_branch_actions::upstream_integration::{
+        BaseBranchResolution, BaseBranchResolutionApproach, BranchStatuses, Resolution,
     };
-    use gitbutler_branch_actions::upstream_integration::{BranchStatuses, Resolution};
     use gitbutler_branch_actions::{
         BaseBranch, BranchListing, BranchListingDetails, BranchListingFilter, RemoteBranch,
-        RemoteBranchData, RemoteBranchFile, VirtualBranches,
+        RemoteBranchData, RemoteBranchFile, RemoteCommit, VirtualBranches,
     };
     use gitbutler_command_context::CommandContext;
     use gitbutler_project as projects;
     use gitbutler_project::{FetchResult, ProjectId};
-    use gitbutler_reference::{
-        normalize_branch_name as normalize_name, ReferenceName, Refname, RemoteRefname,
-    };
+    use gitbutler_reference::{normalize_branch_name as normalize_name, Refname, RemoteRefname};
+    use gitbutler_stack::{BranchOwnershipClaims, StackId};
     use std::path::PathBuf;
     use tauri::State;
     use tracing::instrument;
@@ -32,7 +32,7 @@ pub mod commands {
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch: BranchId,
+        branch: StackId,
         message: &str,
         ownership: Option<BranchOwnershipClaims>,
         run_hooks: bool,
@@ -71,7 +71,7 @@ pub mod commands {
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
         branch: BranchCreateRequest,
-    ) -> Result<BranchId, Error> {
+    ) -> Result<StackId, Error> {
         let project = projects.get(project_id)?;
         let branch_id = gitbutler_branch_actions::create_virtual_branch(&project, &branch)?;
         emit_vbranches(&windows, project_id);
@@ -101,7 +101,7 @@ pub mod commands {
         project_id: ProjectId,
         branch: Refname,
         remote: Option<RemoteRefname>,
-    ) -> Result<BranchId, Error> {
+    ) -> Result<StackId, Error> {
         let project = projects.get(project_id)?;
         let branch_id =
             gitbutler_branch_actions::create_virtual_branch_from_branch(&project, &branch, remote)?;
@@ -115,7 +115,7 @@ pub mod commands {
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch: BranchId,
+        branch: StackId,
     ) -> Result<(), Error> {
         let project = projects.get(project_id)?;
         gitbutler_branch_actions::integrate_upstream_commits(&project, branch)?;
@@ -162,15 +162,16 @@ pub mod commands {
 
     #[tauri::command(async)]
     #[instrument(skip(projects, windows), err(Debug))]
-    pub fn update_base_branch(
+    pub fn push_base_branch(
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-    ) -> Result<Vec<ReferenceName>, Error> {
+        with_force: bool,
+    ) -> Result<(), Error> {
         let project = projects.get(project_id)?;
-        let unapplied_branches = gitbutler_branch_actions::update_base_branch(&project)?;
+        gitbutler_branch_actions::push_base_branch(&project, with_force)?;
         emit_vbranches(&windows, project_id);
-        Ok(unapplied_branches)
+        Ok(())
     }
 
     #[tauri::command(async)]
@@ -208,7 +209,7 @@ pub mod commands {
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch_id: BranchId,
+        branch_id: StackId,
     ) -> Result<(), Error> {
         let project = projects.get(project_id)?;
         gitbutler_branch_actions::unapply_without_saving_virtual_branch(&project, branch_id)?;
@@ -222,7 +223,7 @@ pub mod commands {
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch: BranchId,
+        branch: StackId,
     ) -> Result<(), Error> {
         let project = projects.get(project_id)?;
         gitbutler_branch_actions::save_and_unapply_virutal_branch(&project, branch)?;
@@ -250,7 +251,7 @@ pub mod commands {
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch_id: BranchId,
+        branch_id: StackId,
         files: Vec<PathBuf>,
     ) -> Result<(), Error> {
         let project = projects.get(project_id)?;
@@ -265,9 +266,9 @@ pub mod commands {
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch_id: BranchId,
+        branch_id: StackId,
         with_force: bool,
-    ) -> Result<Refname, Error> {
+    ) -> Result<PushResult, Error> {
         let project = projects.get(project_id)?;
         let upstream_refname = gitbutler_branch_actions::push_virtual_branch(
             &project,
@@ -310,7 +311,7 @@ pub mod commands {
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch_id: BranchId,
+        branch_id: StackId,
         target_commit_oid: String,
     ) -> Result<(), Error> {
         let project = projects.get(project_id)?;
@@ -326,7 +327,7 @@ pub mod commands {
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch_id: BranchId,
+        branch_id: StackId,
         commit_oid: String,
         ownership: BranchOwnershipClaims,
     ) -> Result<String, Error> {
@@ -343,7 +344,7 @@ pub mod commands {
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch_id: BranchId,
+        branch_id: StackId,
         from_commit_oid: String,
         to_commit_oid: String,
         ownership: BranchOwnershipClaims,
@@ -368,7 +369,7 @@ pub mod commands {
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch_id: BranchId,
+        branch_id: StackId,
         commit_oid: String,
     ) -> Result<(), Error> {
         let project = projects.get(project_id)?;
@@ -384,7 +385,7 @@ pub mod commands {
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch_id: BranchId,
+        branch_id: StackId,
         commit_oid: String,
         offset: i32,
     ) -> Result<(), Error> {
@@ -397,64 +398,11 @@ pub mod commands {
 
     #[tauri::command(async)]
     #[instrument(skip(projects, windows), err(Debug))]
-    pub fn create_change_reference(
-        windows: State<'_, WindowState>,
-        projects: State<'_, projects::Controller>,
-        project_id: ProjectId,
-        branch_id: BranchId,
-        name: ReferenceName,
-        change_id: String,
-    ) -> Result<(), Error> {
-        let project = projects.get(project_id)?;
-        gitbutler_branch_actions::create_change_reference(&project, branch_id, name, change_id)?;
-        emit_vbranches(&windows, project_id);
-        Ok(())
-    }
-
-    #[tauri::command(async)]
-    #[instrument(skip(projects, windows), err(Debug))]
-    pub fn push_change_reference(
-        windows: State<'_, WindowState>,
-        projects: State<'_, projects::Controller>,
-        project_id: ProjectId,
-        branch_id: BranchId,
-        name: ReferenceName,
-        with_force: bool,
-    ) -> Result<(), Error> {
-        let project = projects.get(project_id)?;
-        gitbutler_branch_actions::push_change_reference(&project, branch_id, name, with_force)?;
-        emit_vbranches(&windows, project_id);
-        Ok(())
-    }
-
-    #[tauri::command(async)]
-    #[instrument(skip(projects, windows), err(Debug))]
-    pub fn update_change_reference(
-        windows: State<'_, WindowState>,
-        projects: State<'_, projects::Controller>,
-        project_id: ProjectId,
-        branch_id: BranchId,
-        name: ReferenceName,
-        new_change_id: String,
-    ) -> Result<(), Error> {
-        let project = projects.get(project_id)?;
-        gitbutler_branch_actions::update_change_reference(
-            &project,
-            branch_id,
-            name,
-            new_change_id,
-        )?;
-        emit_vbranches(&windows, project_id);
-        Ok(())
-    }
-
-    #[tauri::command(async)]
-    #[instrument(skip(projects, windows), err(Debug))]
     pub fn reorder_commit(
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch_id: BranchId,
+        branch_id: StackId,
         commit_oid: String,
         offset: i32,
     ) -> Result<(), Error> {
@@ -518,7 +466,7 @@ pub mod commands {
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch_id: BranchId,
+        branch_id: StackId,
         target_commit_oid: String,
     ) -> Result<(), Error> {
         let project = projects.get(project_id)?;
@@ -568,7 +516,7 @@ pub mod commands {
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
         commit_oid: String,
-        target_branch_id: BranchId,
+        target_branch_id: StackId,
     ) -> Result<(), Error> {
         let project = projects.get(project_id)?;
         let commit_oid = git2::Oid::from_str(&commit_oid).map_err(|e| anyhow!(e))?;
@@ -583,7 +531,7 @@ pub mod commands {
         windows: State<'_, WindowState>,
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
-        branch_id: BranchId,
+        branch_id: StackId,
         commit_oid: String,
         message: &str,
     ) -> Result<(), Error> {
@@ -596,13 +544,29 @@ pub mod commands {
 
     #[tauri::command(async)]
     #[instrument(skip(projects), err(Debug))]
+    pub fn find_commit(
+        projects: State<'_, projects::Controller>,
+        project_id: ProjectId,
+        commit_oid: String,
+    ) -> Result<Option<RemoteCommit>, Error> {
+        let project = projects.get(project_id)?;
+        let commit_oid = git2::Oid::from_str(&commit_oid).map_err(|e| anyhow!(e))?;
+        gitbutler_branch_actions::find_commit(&project, commit_oid).map_err(Into::into)
+    }
+
+    #[tauri::command(async)]
+    #[instrument(skip(projects), err(Debug))]
     pub fn upstream_integration_statuses(
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
+        target_commit_oid: Option<String>,
     ) -> Result<BranchStatuses, Error> {
         let project = projects.get(project_id)?;
+        let commit_oid = target_commit_oid
+            .map(|commit_id| git2::Oid::from_str(&commit_id).map_err(|e| anyhow!(e)))
+            .transpose()?;
         Ok(gitbutler_branch_actions::upstream_integration_statuses(
-            &project,
+            &project, commit_oid,
         )?)
     }
 
@@ -613,17 +577,36 @@ pub mod commands {
         projects: State<'_, projects::Controller>,
         project_id: ProjectId,
         resolutions: Vec<Resolution>,
+        base_branch_resolution: Option<BaseBranchResolution>,
     ) -> Result<(), Error> {
         let project = projects.get(project_id)?;
-
-        gitbutler_branch_actions::integrate_upstream(&project, &resolutions)?;
+        gitbutler_branch_actions::integrate_upstream(
+            &project,
+            &resolutions,
+            base_branch_resolution,
+        )?;
 
         emit_vbranches(&windows, project_id);
 
         Ok(())
     }
 
-    fn emit_vbranches(windows: &WindowState, project_id: projects::ProjectId) {
+    #[tauri::command(async)]
+    #[instrument(skip(projects), err(Debug))]
+    pub fn resolve_upstream_integration(
+        projects: State<'_, projects::Controller>,
+        project_id: ProjectId,
+        resolution_approach: BaseBranchResolutionApproach,
+    ) -> Result<String, Error> {
+        let project = projects.get(project_id)?;
+
+        let new_target_id =
+            gitbutler_branch_actions::resolve_upstream_integration(&project, resolution_approach)?;
+        let commit_id = git2::Oid::to_string(&new_target_id);
+        Ok(commit_id)
+    }
+
+    pub(crate) fn emit_vbranches(windows: &WindowState, project_id: projects::ProjectId) {
         if let Err(error) = windows.post(gitbutler_watcher::Action::CalculateVirtualBranches(
             project_id,
         )) {

@@ -5,7 +5,7 @@
 	import Section from '$lib/settings/Section.svelte';
 	import TextBox from '$lib/shared/TextBox.svelte';
 	import Toggle from '$lib/shared/Toggle.svelte';
-	import { getContext } from '$lib/utils/context';
+	import { getContext } from '@gitbutler/shared/context';
 
 	const projectService = getContext(ProjectService);
 	const project = getContext(Project);
@@ -30,13 +30,6 @@
 	async function setSnapshotLinesThreshold(value: number) {
 		project.snapshot_lines_threshold = value;
 		await projectService.updateProject(project);
-	}
-
-	let succeedingRebases = project.succeedingRebases;
-
-	$: {
-		project.succeedingRebases = succeedingRebases;
-		projectService.updateProject(project);
 	}
 
 	async function setUseNewLocking(value: boolean) {
@@ -126,18 +119,6 @@
 		</svelte:fragment>
 		<svelte:fragment slot="actions">
 			<Toggle id="useNewLocking" bind:checked={useNewLocking} />
-		</svelte:fragment>
-	</SectionCard>
-
-	<SectionCard labelFor="succeedingRebases" orientation="row">
-		<svelte:fragment slot="title">Edit mode and succeeding rebases</svelte:fragment>
-		<svelte:fragment slot="caption">
-			This is an experimental setting which will ensure that rebasing will always succeed,
-			introduces a mode for editing individual commits, and adds the ability to resolve conflicted
-			commits.
-		</svelte:fragment>
-		<svelte:fragment slot="actions">
-			<Toggle id="succeedingRebases" bind:checked={succeedingRebases} />
 		</svelte:fragment>
 	</SectionCard>
 </Section>

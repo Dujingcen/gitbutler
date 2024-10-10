@@ -15,7 +15,7 @@
 	import Spacer from '$lib/shared/Spacer.svelte';
 	import TextBox from '$lib/shared/TextBox.svelte';
 	import { UserService } from '$lib/stores/user';
-	import { getContext } from '$lib/utils/context';
+	import { getContext } from '@gitbutler/shared/context';
 	import { onMount, tick } from 'svelte';
 
 	const gitConfigService = getContext(GitConfigService);
@@ -173,8 +173,8 @@
 						options={keyOptions}
 						label="Do you want to provide your own key?"
 						onselect={(value) => {
-						openAIKeyOption = value as KeyOption;
-					}}
+							openAIKeyOption = value as KeyOption;
+						}}
 					>
 						{#snippet itemSnippet({ item, highlighted })}
 							<SelectItem selected={item.value === openAIKeyOption} {highlighted}>
@@ -203,8 +203,8 @@
 							options={openAIModelOptions}
 							label="Model version"
 							onselect={(value) => {
-							openAIModelName = value as OpenAIModelName;
-						}}
+								openAIModelName = value as OpenAIModelName;
+							}}
 						>
 							{#snippet itemSnippet({ item, highlighted })}
 								<SelectItem selected={item.value === openAIModelName} {highlighted}>
@@ -237,8 +237,8 @@
 						options={keyOptions}
 						label="Do you want to provide your own key?"
 						onselect={(value) => {
-						anthropicKeyOption = value as KeyOption;
-					}}
+							anthropicKeyOption = value as KeyOption;
+						}}
 					>
 						{#snippet itemSnippet({ item, highlighted })}
 							<SelectItem selected={item.value === anthropicKeyOption} {highlighted}>
@@ -272,8 +272,8 @@
 							options={anthropicModelOptions}
 							label="Model version"
 							onselect={(value) => {
-							anthropicModelName = value as AnthropicModelName;
-						}}
+								anthropicModelName = value as AnthropicModelName;
+							}}
 						>
 							{#snippet itemSnippet({ item, highlighted })}
 								<SelectItem selected={item.value === anthropicModelName} {highlighted}>

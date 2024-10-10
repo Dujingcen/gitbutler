@@ -11,26 +11,29 @@ use crate::{
 use anyhow::{anyhow, bail, Context, Result};
 use bstr::{BString, ByteSlice};
 use git2_hooks::HookResult;
-use gitbutler_branch::{
-    dedup, dedup_fmt, reconcile_claims, signature, Branch, BranchId, BranchOwnershipClaims,
-    BranchUpdateRequest, OwnershipClaim, SignaturePurpose, Target, VirtualBranchesHandle,
-};
+use gitbutler_branch::BranchUpdateRequest;
+use gitbutler_branch::{dedup, dedup_fmt};
 use gitbutler_cherry_pick::RepositoryExt as _;
 use gitbutler_command_context::CommandContext;
 use gitbutler_commit::{commit_ext::CommitExt, commit_headers::HasCommitHeaders};
 use gitbutler_diff::{trees, GitHunk, Hunk};
-use gitbutler_error::error::{Code, Marker};
+use gitbutler_error::error::Code;
 use gitbutler_operating_modes::assure_open_workspace_mode;
+use gitbutler_oxidize::git2_signature_to_gix_signature;
 use gitbutler_project::access::WorktreeWritePermission;
 use gitbutler_reference::{normalize_branch_name, Refname, RemoteRefname};
 use gitbutler_repo::{
     rebase::{cherry_rebase, cherry_rebase_group},
     LogUntil, RepoActionsExt, RepositoryExt,
 };
+use gitbutler_stack::{
+    reconcile_claims, BranchOwnershipClaims, Stack, StackId, Target, VirtualBranchesHandle,
+};
+use gitbutler_stack_api::{commit_by_oid_or_change_id, StackExt};
 use gitbutler_time::time::now_since_unix_epoch_ms;
 use serde::Serialize;
 use std::collections::HashSet;
-use std::{borrow::Cow, collections::HashMap, path::PathBuf, vec};
+use std::{collections::HashMap, path::PathBuf, vec};
 use tracing::instrument;
 
 // this struct is a mapping to the view `Branch` type in Typescript
@@ -44,7 +47,7 @@ use tracing::instrument;
 #[serde(rename_all = "camelCase")]
 #[allow(clippy::struct_excessive_bools)]
 pub struct VirtualBranch {
-    pub id: BranchId,
+    pub id: StackId,
     pub name: String,
     pub notes: String,
     pub active: bool,
@@ -73,6 +76,25 @@ pub struct VirtualBranch {
     pub refname: Refname,
     #[serde(with = "gitbutler_serde::oid")]
     pub tree: git2::Oid,
+    /// New way to group commits into a multiple patch series
+    /// Most recent entries are first in order
+    pub series: Vec<PatchSeries>,
+}
+
+/// A grouping that combines multiple commits into a patch series
+///
+/// We deviate slightly from established language as we are transitioning from lanes representing
+/// independent branches to representing independent stacks of dependent patch series (branches).
+#[derive(Debug, PartialEq, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchSeries {
+    pub name: String,
+    pub description: Option<String>,
+    pub upstream_reference: Option<String>,
+    /// List of patches beloning to this series, from newest to oldest
+    pub patches: Vec<VirtualBranchCommit>,
+    /// List of patches that only exist on the upstream branch
+    pub upstream_patches: Vec<VirtualBranchCommit>,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize)]
@@ -80,6 +102,13 @@ pub struct VirtualBranch {
 pub struct VirtualBranches {
     pub branches: Vec<VirtualBranch>,
     pub skipped_files: Vec<gitbutler_diff::FileDiff>,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushResult {
+    pub remote: String,
+    pub refname: Refname,
 }
 
 pub fn unapply_ownership(
@@ -180,7 +209,7 @@ pub fn unapply_ownership(
 // reset a file in the project to the index state
 pub(crate) fn reset_files(
     ctx: &CommandContext,
-    branch_id: BranchId,
+    branch_id: StackId,
     files: &[PathBuf],
     perm: &mut WorktreeWritePermission,
 ) -> Result<()> {
@@ -268,7 +297,7 @@ pub fn list_virtual_branches_cached(
         update_conflict_markers(ctx, files.clone())?;
 
         let upstream_branch = match branch.clone().upstream {
-            Some(upstream) => repo.find_branch_by_refname(&Refname::from(upstream))?,
+            Some(upstream) => repo.maybe_find_branch_by_refname(&Refname::from(upstream))?,
             None => None,
         };
 
@@ -315,7 +344,7 @@ pub fn list_virtual_branches_cached(
         let mut is_remote = false;
 
         // find all commits on head that are not on target.sha
-        let commits = repo.log(branch.head, LogUntil::Commit(default_target.sha))?;
+        let commits = repo.log(branch.head(), LogUntil::Commit(default_target.sha))?;
         let check_commit = IsCommitIntegrated::new(ctx, &default_target)?;
         let vbranch_commits = {
             let _span = tracing::debug_span!(
@@ -351,13 +380,14 @@ pub fn list_virtual_branches_cached(
                         is_integrated,
                         is_remote,
                         copied_from_remote_id,
+                        None, // remote_commit_id is only used inside PatchSeries
                     )
                 })
                 .collect::<Result<Vec<_>>>()?
         };
 
         let merge_base = repo
-            .merge_base(default_target.sha, branch.head)
+            .merge_base(default_target.sha, branch.head())
             .context("failed to find merge base")?;
         let base_current = true;
 
@@ -381,7 +411,7 @@ pub fn list_virtual_branches_cached(
                 .cmp(path_claim_positions.get(&b.path).unwrap_or(&usize::MAX))
         });
 
-        let requires_force = is_requires_force(ctx, &branch)?;
+        let mut requires_force = is_requires_force(ctx, &branch)?;
 
         let fork_point = commits
             .last()
@@ -390,6 +420,27 @@ pub fn list_virtual_branches_cached(
 
         let refname = branch.refname()?.into();
 
+        // TODO: Error out here once this API is stable
+        let series = match stack_series(
+            ctx,
+            &branch,
+            &default_target,
+            &check_commit,
+            remote_commit_data,
+        ) {
+            Ok((series, force)) => {
+                if series.iter().any(|s| s.upstream_reference.is_some()) {
+                    requires_force = force; // derive force requirement from the series
+                }
+                series
+            }
+            Err(e) => {
+                tracing::warn!("failed to compute stack series: {:?}", e);
+                vec![]
+            }
+        };
+
+        let head = branch.head();
         let branch = VirtualBranch {
             id: branch.id,
             name: branch.name,
@@ -409,11 +460,12 @@ pub fn list_virtual_branches_cached(
             updated_at: branch.updated_timestamp_ms,
             selected_for_changes: branch.selected_for_changes == Some(max_selected_for_changes),
             allow_rebasing: branch.allow_rebasing,
-            head: branch.head,
+            head,
             merge_base,
             fork_point,
             refname,
             tree: branch.tree,
+            series,
         };
         branches.push(branch);
     }
@@ -423,6 +475,95 @@ pub fn list_virtual_branches_cached(
     branches.sort_by(|a, b| a.order.cmp(&b.order));
 
     Ok((branches, status.skipped_files))
+}
+
+/// Returns the stack series for the API.
+/// Newest first, oldest last in the list
+fn stack_series(
+    ctx: &CommandContext,
+    branch: &Stack,
+    default_target: &Target,
+    check_commit: &IsCommitIntegrated,
+    remote_commit_data: HashMap<CommitData, git2::Oid>,
+) -> Result<(Vec<PatchSeries>, bool)> {
+    let mut requires_force = false;
+    let mut api_series: Vec<PatchSeries> = vec![];
+    let stack_series = branch.list_series(ctx)?;
+    for series in stack_series.clone() {
+        let upstream_reference = default_target.push_remote_name.as_ref().and_then(|remote| {
+            if series.head.pushed(remote.as_str(), ctx).ok()? {
+                series.head.remote_reference(remote.as_str()).ok()
+            } else {
+                None
+            }
+        });
+        let mut patches: Vec<VirtualBranchCommit> = vec![];
+        for patch in series.clone().local_commits {
+            let commit = commit_by_oid_or_change_id(&patch, ctx, branch.head(), default_target)?;
+            let is_integrated = check_commit.is_integrated(&commit)?;
+            let copied_from_remote_id = CommitData::try_from(&commit)
+                .ok()
+                .and_then(|data| remote_commit_data.get(&data).copied());
+            let remote_commit_id = commit
+                .change_id()
+                .and_then(|change_id| {
+                    series
+                        .remote_commit_ids_by_change_id
+                        .get(&change_id)
+                        .cloned()
+                })
+                .or(copied_from_remote_id);
+            if remote_commit_id.map_or(false, |id| commit.id() != id) {
+                requires_force = true;
+            }
+            let vcommit = commit_to_vbranch_commit(
+                ctx,
+                branch,
+                &commit,
+                is_integrated,
+                series.remote(&patch),
+                copied_from_remote_id,
+                remote_commit_id,
+            )?;
+            patches.push(vcommit);
+        }
+        patches.reverse();
+        let mut upstream_patches = vec![];
+        if let Some(upstream_reference) = upstream_reference.clone() {
+            let remote_head = ctx
+                .repository()
+                .find_reference(&upstream_reference)?
+                .peel_to_commit()?;
+            for patch in series.upstream_only(&stack_series) {
+                if let Ok(commit) =
+                    commit_by_oid_or_change_id(&patch, ctx, remote_head.id(), default_target)
+                {
+                    let is_integrated = check_commit.is_integrated(&commit)?;
+                    let vcommit = commit_to_vbranch_commit(
+                        ctx,
+                        branch,
+                        &commit,
+                        is_integrated,
+                        true, // per definition
+                        None, // per definition
+                        Some(commit.id()),
+                    )?;
+                    upstream_patches.push(vcommit);
+                };
+            }
+        }
+        upstream_patches.reverse();
+        api_series.push(PatchSeries {
+            name: series.head.name,
+            description: series.head.description,
+            upstream_reference,
+            patches,
+            upstream_patches,
+        });
+    }
+    api_series.reverse();
+
+    Ok((api_series, requires_force))
 }
 
 /// The commit-data we can use for comparison to see which remote-commit was used to craete
@@ -447,18 +588,6 @@ impl TryFrom<&git2::Commit<'_>> for CommitData {
     }
 }
 
-fn git2_signature_to_gix_signature(input: git2::Signature<'_>) -> gix::actor::Signature {
-    gix::actor::Signature {
-        name: input.name_bytes().into(),
-        email: input.email_bytes().into(),
-        time: gix::date::Time {
-            seconds: input.when().seconds(),
-            offset: input.when().offset_minutes() * 60,
-            sign: input.when().offset_minutes().into(),
-        },
-    }
-}
-
 fn branches_with_large_files_abridged(mut branches: Vec<VirtualBranch>) -> Vec<VirtualBranch> {
     for branch in &mut branches {
         for file in &mut branch.files {
@@ -474,12 +603,7 @@ fn branches_with_large_files_abridged(mut branches: Vec<VirtualBranch>) -> Vec<V
     branches
 }
 
-fn joined(start_a: u32, end_a: u32, start_b: u32, end_b: u32) -> bool {
-    ((start_a >= start_b && start_a <= end_b) || (end_a >= start_b && end_a <= end_b))
-        || ((start_b >= start_a && start_b <= end_a) || (end_b >= start_a && end_b <= end_a))
-}
-
-fn is_requires_force(ctx: &CommandContext, branch: &Branch) -> Result<bool> {
+fn is_requires_force(ctx: &CommandContext, branch: &Stack) -> Result<bool> {
     let upstream = if let Some(upstream) = &branch.upstream {
         upstream
     } else {
@@ -499,218 +623,12 @@ fn is_requires_force(ctx: &CommandContext, branch: &Branch) -> Result<bool> {
 
     let merge_base = ctx
         .repository()
-        .merge_base(upstream_commit.id(), branch.head)?;
+        .merge_base(upstream_commit.id(), branch.head())?;
 
     Ok(merge_base != upstream_commit.id())
 }
 
-/// Integrates upstream work from a remote branch.
-///
-/// First we determine strategy based on preferences and branch state. If you
-/// have allowed force push then it is likely branch commits frequently get
-/// rebased, meaning we want to cherry pick new upstream work onto our rebased
-/// commits.
-///
-/// If your local branch has been rebased, but you have new local only commits,
-/// we _must_ rebase the upstream commits on top of the last rebased commit. We
-/// do this to avoid duplicate commits, but we then need to let the user decide
-/// if the local only commits get rebased on top of new upstream work or merged
-/// with the new commits. The latter is sometimes preferable because you have
-/// at most one merge conflict to resolve, while rebasing requires a multi-step
-/// interactive process (currently not supported, so we abort).
-///
-/// If you do not allow force push then first validate the remote branch and
-/// your local branch have the same merge base. A different merge base means
-/// means either you or the remote branch has been rebased, and merging the
-/// two would introduce duplicate commits (same changes, different hash).
-///
-/// Additionally, if we succeed in integrating the upstream commit, we still
-/// need to merge the new branch tree with the working directory tree. This
-/// might introduce more conflicts, but there is no need to commit at the
-/// end since there will only be one parent commit.
-///
-pub fn integrate_upstream_commits(ctx: &CommandContext, branch_id: BranchId) -> Result<()> {
-    conflicts::is_conflicting(ctx, None)?;
-
-    let repo = ctx.repository();
-    let project = ctx.project();
-    let vb_state = project.virtual_branches();
-
-    let mut branch = vb_state.get_branch_in_workspace(branch_id)?;
-    let default_target = vb_state.get_default_target()?;
-
-    let upstream_branch = branch.upstream.as_ref().context("upstream not found")?;
-    let upstream_oid = repo.refname_to_id(&upstream_branch.to_string())?;
-    let upstream_commit = repo.find_commit(upstream_oid)?;
-
-    if upstream_commit.id() == branch.head {
-        return Ok(());
-    }
-
-    let upstream_commits = repo.list_commits(upstream_commit.id(), default_target.sha)?;
-    let branch_commits = repo.list_commits(branch.head, default_target.sha)?;
-
-    let branch_commit_ids = branch_commits.iter().map(|c| c.id()).collect::<Vec<_>>();
-
-    let branch_change_ids = branch_commits
-        .iter()
-        .filter_map(|c| c.change_id())
-        .collect::<Vec<_>>();
-
-    let mut unknown_commits: Vec<git2::Oid> = upstream_commits
-        .iter()
-        .filter(|c| {
-            (!c.change_id()
-                .is_some_and(|cid| branch_change_ids.contains(&cid)))
-                && !branch_commit_ids.contains(&c.id())
-        })
-        .map(|c| c.id())
-        .collect::<Vec<_>>();
-
-    let rebased_commits = upstream_commits
-        .iter()
-        .filter(|c| {
-            c.change_id()
-                .is_some_and(|cid| branch_change_ids.contains(&cid))
-                && !branch_commit_ids.contains(&c.id())
-        })
-        .map(|c| c.id())
-        .collect::<Vec<_>>();
-
-    // If there are no new commits then there is nothing to do.
-    if unknown_commits.is_empty() {
-        return Ok(());
-    };
-
-    let merge_base = repo.merge_base(default_target.sha, upstream_oid)?;
-
-    // Booleans needed for a decision on how integrate upstream commits.
-    // let is_same_base = default_target.sha == merge_base;
-    let can_use_force = branch.allow_rebasing;
-    let has_rebased_commits = !rebased_commits.is_empty();
-
-    // We can't proceed if we rebased local commits but no permission to force push. In this
-    // scenario we would need to "cherry rebase" new upstream commits onto the last rebased
-    // local commit.
-    if has_rebased_commits && !can_use_force {
-        return Err(anyhow!("Cannot merge rebased commits without force push")
-            .context("Aborted because force push is disallowed and commits have been rebased")
-            .context(Marker::ProjectConflict));
-    }
-
-    let integration_result = match can_use_force {
-        true => integrate_with_rebase(ctx, &mut branch, &mut unknown_commits),
-        false => {
-            if has_rebased_commits {
-                return Err(anyhow!("Cannot merge rebased commits without force push")
-                    .context(
-                        "Aborted because force push is disallowed and commits have been rebased",
-                    )
-                    .context(Marker::ProjectConflict));
-            }
-            integrate_with_merge(ctx, &mut branch, &upstream_commit, merge_base).map(Into::into)
-        }
-    };
-
-    if integration_result.as_ref().err().map_or(false, |err| {
-        err.downcast_ref()
-            .is_some_and(|marker: &Marker| *marker == Marker::ProjectConflict)
-    }) {
-        return Ok(());
-    };
-
-    let new_head = integration_result?;
-    let new_head_tree = repo.find_commit(new_head)?.tree()?;
-    let head_commit = repo.find_commit(new_head)?;
-
-    let wd_tree = ctx.repository().create_wd_tree()?;
-    let workspace_tree = repo.find_commit(get_workspace_head(ctx)?)?.tree()?;
-
-    let mut merge_index = repo.merge_trees(&workspace_tree, &new_head_tree, &wd_tree, None)?;
-
-    if merge_index.has_conflicts() {
-        repo.checkout_index_builder(&mut merge_index)
-            .allow_conflicts()
-            .conflict_style_merge()
-            .force()
-            .checkout()?;
-    } else {
-        branch.head = new_head;
-        branch.tree = head_commit.tree()?.id();
-        vb_state.set_branch(branch.clone())?;
-        repo.checkout_index_builder(&mut merge_index)
-            .force()
-            .checkout()?;
-    };
-
-    crate::integration::update_workspace_commit(&vb_state, ctx)?;
-    Ok(())
-}
-
-pub(crate) fn integrate_with_rebase(
-    ctx: &CommandContext,
-    branch: &mut Branch,
-    unknown_commits: &mut Vec<git2::Oid>,
-) -> Result<git2::Oid> {
-    cherry_rebase_group(
-        ctx.repository(),
-        branch.head,
-        unknown_commits.as_mut_slice(),
-        ctx.project().succeeding_rebases,
-    )
-}
-
-pub(crate) fn integrate_with_merge(
-    ctx: &CommandContext,
-    branch: &mut Branch,
-    upstream_commit: &git2::Commit,
-    merge_base: git2::Oid,
-) -> Result<git2::Oid> {
-    let wd_tree = ctx.repository().create_wd_tree()?;
-    let repo = ctx.repository();
-    let remote_tree = upstream_commit.tree().context("failed to get tree")?;
-    let upstream_branch = branch.upstream.as_ref().context("upstream not found")?;
-    // let merge_tree = repo.find_commit(merge_base).and_then(|c| c.tree())?;
-    let merge_tree = repo.find_commit(merge_base)?;
-    let merge_tree = merge_tree.tree()?;
-
-    let mut merge_index = repo.merge_trees(&merge_tree, &wd_tree, &remote_tree, None)?;
-
-    if merge_index.has_conflicts() {
-        let conflicts = merge_index.conflicts()?;
-        let merge_conflicts = conflicts
-            .flatten()
-            .filter_map(|c| c.our)
-            .map(|our| gix::path::try_from_bstr(Cow::Owned(our.path.into())))
-            .collect::<Result<Vec<_>, _>>()?;
-        conflicts::mark(ctx, merge_conflicts, Some(upstream_commit.id()))?;
-        repo.checkout_index_builder(&mut merge_index)
-            .allow_conflicts()
-            .conflict_style_merge()
-            .force()
-            .checkout()?;
-        return Err(anyhow!("merge problem")).context(Marker::ProjectConflict);
-    }
-
-    let merge_tree_oid = merge_index.write_tree_to(ctx.repository())?;
-    let merge_tree = repo.find_tree(merge_tree_oid)?;
-    let head_commit = repo.find_commit(branch.head)?;
-
-    ctx.commit(
-        format!(
-            "Merged {}/{} into {}",
-            upstream_branch.remote(),
-            upstream_branch.branch(),
-            branch.name
-        )
-        .as_str(),
-        &merge_tree,
-        &[&head_commit, upstream_commit],
-        None,
-    )
-}
-
-pub fn update_branch(ctx: &CommandContext, branch_update: &BranchUpdateRequest) -> Result<Branch> {
+pub fn update_branch(ctx: &CommandContext, branch_update: &BranchUpdateRequest) -> Result<Stack> {
     let vb_state = ctx.project().virtual_branches();
     let mut branch = vb_state.get_branch_in_workspace(branch_update.id)?;
 
@@ -814,7 +732,7 @@ pub(crate) fn ensure_selected_for_changes(vb_state: &VirtualBranchesHandle) -> R
 
 pub(crate) fn set_ownership(
     vb_state: &VirtualBranchesHandle,
-    target_branch: &mut Branch,
+    target_branch: &mut Stack,
     ownership: &BranchOwnershipClaims,
 ) -> Result<()> {
     if target_branch.ownership.eq(ownership) {
@@ -848,7 +766,7 @@ pub type VirtualBranchHunksByPathMap = HashMap<PathBuf, Vec<VirtualBranchHunk>>;
 // reset virtual branch to a specific commit
 pub(crate) fn reset_branch(
     ctx: &CommandContext,
-    branch_id: BranchId,
+    branch_id: StackId,
     target_commit_id: git2::Oid,
 ) -> Result<()> {
     let vb_state = ctx.project().virtual_branches();
@@ -856,7 +774,7 @@ pub(crate) fn reset_branch(
     let default_target = vb_state.get_default_target()?;
 
     let mut branch = vb_state.get_branch_in_workspace(branch_id)?;
-    if branch.head == target_commit_id {
+    if branch.head() == target_commit_id {
         // nothing to do
         return Ok(());
     }
@@ -864,7 +782,7 @@ pub(crate) fn reset_branch(
     if default_target.sha != target_commit_id
         && !ctx
             .repository()
-            .l(branch.head, LogUntil::Commit(default_target.sha))?
+            .l(branch.head(), LogUntil::Commit(default_target.sha))?
             .contains(&target_commit_id)
     {
         bail!("commit {target_commit_id} not in the branch");
@@ -874,9 +792,7 @@ pub(crate) fn reset_branch(
     // what hunks were released by this reset, and assign them to this branch.
     let old_head = get_workspace_head(ctx)?;
 
-    branch.head = target_commit_id;
-    branch.updated_timestamp_ms = gitbutler_time::time::now_ms();
-    vb_state.set_branch(branch.clone())?;
+    branch.set_stack_head(ctx, target_commit_id, None)?;
 
     let updated_head = get_workspace_head(ctx)?;
     let repo = ctx.repository();
@@ -921,7 +837,7 @@ pub(crate) fn reset_branch(
 #[allow(clippy::too_many_arguments)]
 pub fn commit(
     ctx: &CommandContext,
-    branch_id: BranchId,
+    branch_id: StackId,
     message: &str,
     ownership: Option<&BranchOwnershipClaims>,
     run_hooks: bool,
@@ -995,19 +911,19 @@ pub fn commit(
                 Some((file.path, hunks))
             }
         });
-        gitbutler_diff::write::hunks_onto_commit(ctx, branch.head, files)?
+        gitbutler_diff::write::hunks_onto_commit(ctx, branch.head(), files)?
     } else {
         let files = files
             .into_iter()
             .map(|file| (file.path, file.hunks))
             .collect::<Vec<(PathBuf, Vec<VirtualBranchHunk>)>>();
-        gitbutler_diff::write::hunks_onto_commit(ctx, branch.head, files)?
+        gitbutler_diff::write::hunks_onto_commit(ctx, branch.head(), files)?
     };
 
     let git_repository = ctx.repository();
     let parent_commit = git_repository
-        .find_commit(branch.head)
-        .context(format!("failed to find commit {:?}", branch.head))?;
+        .find_commit(branch.head())
+        .context(format!("failed to find commit {:?}", branch.head()))?;
     let tree = git_repository
         .find_tree(tree_oid)
         .context(format!("failed to find tree {:?}", tree_oid))?;
@@ -1038,10 +954,7 @@ pub fn commit(
     }
 
     let vb_state = ctx.project().virtual_branches();
-    branch.tree = tree_oid;
-    branch.head = commit_oid;
-    branch.updated_timestamp_ms = gitbutler_time::time::now_ms();
-    vb_state.set_branch(branch.clone())?;
+    branch.set_stack_head(ctx, commit_oid, Some(tree_oid))?;
 
     crate::integration::update_workspace_commit(&vb_state, ctx)
         .context("failed to update gitbutler workspace")?;
@@ -1051,22 +964,22 @@ pub fn commit(
 
 pub(crate) fn push(
     ctx: &CommandContext,
-    branch_id: BranchId,
+    branch_id: StackId,
     with_force: bool,
-    askpass: Option<Option<BranchId>>,
-) -> Result<Refname> {
+    askpass: Option<Option<StackId>>,
+) -> Result<PushResult> {
     let vb_state = ctx.project().virtual_branches();
+
+    let default_target = vb_state.get_default_target()?;
+    let upstream_remote = match default_target.push_remote_name {
+        Some(remote) => remote.clone(),
+        None => default_target.branch.remote().to_owned(),
+    };
 
     let mut vbranch = vb_state.get_branch_in_workspace(branch_id)?;
     let remote_branch = if let Some(upstream_branch) = &vbranch.upstream {
         upstream_branch.clone()
     } else {
-        let default_target = vb_state.get_default_target()?;
-        let upstream_remote = match default_target.push_remote_name {
-            Some(remote) => remote.clone(),
-            None => default_target.branch.remote().to_owned(),
-        };
-
         let remote_branch = format!(
             "refs/remotes/{}/{}",
             upstream_remote,
@@ -1092,16 +1005,19 @@ pub(crate) fn push(
         ))
     };
 
-    ctx.push(vbranch.head, &remote_branch, with_force, None, askpass)?;
+    ctx.push(vbranch.head(), &remote_branch, with_force, None, askpass)?;
 
     vbranch.upstream = Some(remote_branch.clone());
-    vbranch.upstream_head = Some(vbranch.head);
+    vbranch.upstream_head = Some(vbranch.head());
     vb_state
         .set_branch(vbranch.clone())
         .context("failed to write target branch after push")?;
     ctx.fetch(remote_branch.remote(), askpass.map(|_| "modal".to_string()))?;
 
-    Ok(gitbutler_reference::Refname::Remote(remote_branch))
+    Ok(PushResult {
+        remote: upstream_remote,
+        refname: gitbutler_reference::Refname::Remote(remote_branch),
+    })
 }
 
 struct IsCommitIntegrated<'repo> {
@@ -1118,7 +1034,7 @@ impl<'repo> IsCommitIntegrated<'repo> {
     fn new(ctx: &'repo CommandContext, target: &Target) -> anyhow::Result<Self> {
         let remote_branch = ctx
             .repository()
-            .find_branch_by_refname(&target.branch.clone().into())?
+            .maybe_find_branch_by_refname(&target.branch.clone().into())?
             .ok_or(anyhow!("failed to get branch"))?;
         let remote_head = remote_branch.get().peel_to_commit()?;
         let upstream_commits = ctx
@@ -1202,7 +1118,7 @@ pub fn is_remote_branch_mergeable(
 
     let branch = ctx
         .repository()
-        .find_branch_by_refname(&branch_name.into())?
+        .maybe_find_branch_by_refname(&branch_name.into())?
         .ok_or(anyhow!("branch not found"))?;
     let branch_oid = branch.get().target().context("detatched head")?;
     let branch_commit = ctx
@@ -1233,7 +1149,7 @@ pub fn is_remote_branch_mergeable(
 // then added to the "to" commit and everything above that rebased again.
 pub(crate) fn move_commit_file(
     ctx: &CommandContext,
-    branch_id: BranchId,
+    branch_id: StackId,
     from_commit_id: git2::Oid,
     to_commit_id: git2::Oid,
     target_ownership: &BranchOwnershipClaims,
@@ -1255,7 +1171,7 @@ pub(crate) fn move_commit_file(
     // find all the commits upstream from the target "to" commit
     let mut upstream_commits = ctx
         .repository()
-        .l(target_branch.head, LogUntil::Commit(amend_commit.id()))?;
+        .l(target_branch.head(), LogUntil::Commit(amend_commit.id()))?;
 
     // get a list of all the diffs across all the virtual branches
     let base_file_diffs = gitbutler_diff::workdir(ctx.repository(), default_target.sha)
@@ -1369,19 +1285,23 @@ pub(crate) fn move_commit_file(
             .context("commit failed")?;
 
         // rebase everything above the new "from" commit that has the moved changes removed
-        let new_head =
-            match cherry_rebase(ctx, new_from_commit_oid, from_commit_id, target_branch.head) {
-                Ok(Some(new_head)) => new_head,
-                Ok(None) => bail!("no rebase was performed"),
-                Err(err) => return Err(err).context("rebase failed"),
-            };
+        let new_head = match cherry_rebase(
+            ctx,
+            new_from_commit_oid,
+            from_commit_id,
+            target_branch.head(),
+        ) {
+            Ok(Some(new_head)) => new_head,
+            Ok(None) => bail!("no rebase was performed"),
+            Err(err) => return Err(err).context("rebase failed"),
+        };
 
         // ok, now we need to identify which the new "to" commit is in the rebased history
         // so we'll take a list of the upstream oids and find it simply based on location
         // (since the order should not have changed in our simple rebase)
         let old_upstream_commit_oids = ctx
             .repository()
-            .l(target_branch.head, LogUntil::Commit(default_target.sha))?;
+            .l(target_branch.head(), LogUntil::Commit(default_target.sha))?;
 
         let new_upstream_commit_oids = ctx
             .repository()
@@ -1441,8 +1361,7 @@ pub(crate) fn move_commit_file(
 
     // if there are no upstream commits (the "to" commit was the branch head), then we're done
     if upstream_commits.is_empty() {
-        target_branch.head = commit_oid;
-        vb_state.set_branch(target_branch.clone())?;
+        target_branch.set_stack_head(ctx, commit_oid, None)?;
         crate::integration::update_workspace_commit(&vb_state, ctx)?;
         return Ok(commit_oid);
     }
@@ -1453,8 +1372,7 @@ pub(crate) fn move_commit_file(
 
     // if that rebase worked, update the branch head and the gitbutler workspace
     if let Some(new_head) = new_head {
-        target_branch.head = new_head;
-        vb_state.set_branch(target_branch.clone())?;
+        target_branch.set_stack_head(ctx, new_head, None)?;
         crate::integration::update_workspace_commit(&vb_state, ctx)?;
         Ok(commit_oid)
     } else {
@@ -1467,7 +1385,7 @@ pub(crate) fn move_commit_file(
 // and the respective branch head is updated
 pub(crate) fn amend(
     ctx: &CommandContext,
-    branch_id: BranchId,
+    branch_id: StackId,
     commit_oid: git2::Oid,
     target_ownership: &BranchOwnershipClaims,
 ) -> Result<git2::Oid> {
@@ -1498,7 +1416,7 @@ pub(crate) fn amend(
 
     if ctx
         .repository()
-        .l(target_branch.head, LogUntil::Commit(default_target.sha))?
+        .l(target_branch.head(), LogUntil::Commit(default_target.sha))?
         .is_empty()
     {
         bail!("branch has no commits - there is nothing to amend to");
@@ -1566,11 +1484,10 @@ pub(crate) fn amend(
     // now rebase upstream commits, if needed
     let upstream_commits = ctx
         .repository()
-        .l(target_branch.head, LogUntil::Commit(amend_commit.id()))?;
+        .l(target_branch.head(), LogUntil::Commit(amend_commit.id()))?;
     // if there are no upstream commits, we're done
     if upstream_commits.is_empty() {
-        target_branch.head = commit_oid;
-        vb_state.set_branch(target_branch.clone())?;
+        target_branch.set_stack_head(ctx, commit_oid, None)?;
         crate::integration::update_workspace_commit(&vb_state, ctx)?;
         return Ok(commit_oid);
     }
@@ -1580,8 +1497,7 @@ pub(crate) fn amend(
     let new_head = cherry_rebase(ctx, commit_oid, amend_commit.id(), last_commit)?;
 
     if let Some(new_head) = new_head {
-        target_branch.head = new_head;
-        vb_state.set_branch(target_branch.clone())?;
+        target_branch.set_stack_head(ctx, new_head, None)?;
         crate::integration::update_workspace_commit(&vb_state, ctx)?;
         Ok(commit_oid)
     } else {
@@ -1589,145 +1505,12 @@ pub(crate) fn amend(
     }
 }
 
-// move a given commit in a branch up one or down one
-// if the offset is positive, move the commit down one
-// if the offset is negative, move the commit up one
-// rewrites the branch head to the new head commit
-pub(crate) fn reorder_commit(
-    ctx: &CommandContext,
-    branch_id: BranchId,
-    commit_oid: git2::Oid,
-    offset: i32,
-) -> Result<()> {
-    let vb_state = ctx.project().virtual_branches();
-
-    let default_target = vb_state.get_default_target()?;
-
-    let mut branch = vb_state.get_branch_in_workspace(branch_id)?;
-    // find the commit to offset from
-    let commit = ctx
-        .repository()
-        .find_commit(commit_oid)
-        .context("failed to find commit")?;
-
-    let parent = commit.parent(0).context("failed to find parent")?;
-    let parent_oid = parent.id();
-
-    let repository = ctx.repository();
-
-    let tree = repository
-        .find_tree(branch.tree)
-        .context("Failed to get branch tree")?;
-
-    let author_signature =
-        signature(SignaturePurpose::Author).context("Failed to get gitbutler signature")?;
-    let committer_signature =
-        signature(SignaturePurpose::Committer).context("Failed to get gitbutler signature")?;
-
-    let head = repository
-        .find_commit(branch.head)
-        .context("Failed to find branch head commit")?;
-
-    let tree_commit = repository
-        .commit(
-            None,
-            &author_signature,
-            &committer_signature,
-            "Branch commited changes",
-            &tree,
-            &[&head],
-        )
-        .context("Failed to commit uncommited changes")?;
-
-    let succeeding_rebases = ctx.project().succeeding_rebases;
-
-    if offset < 0 {
-        // move commit up
-        if branch.head == commit_oid {
-            // can't move the head commit up
-            return Ok(());
-        }
-
-        // get a list of the commits to rebase
-        let mut ids_to_rebase = ctx
-            .repository()
-            .l(branch.head, LogUntil::Commit(commit.id()))?;
-
-        ids_to_rebase.insert(
-            ids_to_rebase.len() - offset.unsigned_abs() as usize,
-            commit_oid,
-        );
-
-        let new_head =
-            cherry_rebase_group(repository, parent_oid, &ids_to_rebase, succeeding_rebases)
-                .context("rebase failed")?;
-
-        branch.head = new_head;
-    } else {
-        //  move commit down
-        if default_target.sha == parent_oid {
-            // can't move the commit down past the target
-            return Ok(());
-        }
-
-        let mut target = parent.clone();
-
-        for _ in 0..offset {
-            target = target.parent(0).context("failed to find target")?;
-        }
-
-        let target_oid = target.id();
-
-        // get a list of the commits to rebase
-        let mut ids_to_rebase: Vec<git2::Oid> = ctx
-            .repository()
-            .l(branch.head, LogUntil::Commit(target_oid))?
-            .iter()
-            .filter(|id| **id != commit_oid)
-            .cloned()
-            .collect();
-
-        ids_to_rebase.push(commit_oid);
-
-        let new_head =
-            cherry_rebase_group(repository, target_oid, &ids_to_rebase, succeeding_rebases)
-                .context("rebase failed")?;
-
-        branch.head = new_head;
-    }
-
-    let new_tree_commit =
-        cherry_rebase_group(repository, branch.head, &[tree_commit], succeeding_rebases)
-            .context("rebase failed")?;
-
-    let new_tree_commit = repository
-        .find_commit(new_tree_commit)
-        .context("Failed to find new tree commit")?;
-
-    branch.tree = repository
-        .find_real_tree(&new_tree_commit, Default::default())?
-        .id();
-
-    // Use the conflicted tree commit as the head.
-    if new_tree_commit.is_conflicted() {
-        branch.head = new_tree_commit.id();
-    }
-
-    branch.updated_timestamp_ms = gitbutler_time::time::now_ms();
-    vb_state.set_branch(branch.clone())?;
-
-    crate::integration::update_workspace_commit(&vb_state, ctx)
-        .context("failed to update gitbutler workspace")?;
-
-    Ok(())
-}
-
 // create and insert a blank commit (no tree change) either above or below a commit
 // if offset is positive, insert below, if negative, insert above
 // return the oid of the new head commit of the branch with the inserted blank commit
 pub(crate) fn insert_blank_commit(
     ctx: &CommandContext,
-    branch_id: BranchId,
+    branch_id: StackId,
     commit_oid: git2::Oid,
     offset: i32,
 ) -> Result<()> {
@@ -1751,16 +1534,16 @@ pub(crate) fn insert_blank_commit(
         .unwrap();
     let blank_commit_oid = ctx.commit("", &commit_tree, &[&commit], None)?;
 
-    if commit.id() == branch.head && offset < 0 {
+    if commit.id() == branch.head() && offset < 0 {
         // inserting before the first commit
-        branch.head = blank_commit_oid;
+        branch.set_stack_head(ctx, blank_commit_oid, None)?;
         crate::integration::update_workspace_commit(&vb_state, ctx)
             .context("failed to update gitbutler workspace")?;
     } else {
         // rebase all commits above it onto the new commit
-        match cherry_rebase(ctx, blank_commit_oid, commit.id(), branch.head) {
+        match cherry_rebase(ctx, blank_commit_oid, commit.id(), branch.head()) {
             Ok(Some(new_head)) => {
-                branch.head = new_head;
+                branch.set_stack_head(ctx, new_head, None)?;
                 crate::integration::update_workspace_commit(&vb_state, ctx)
                     .context("failed to update gitbutler workspace")?;
             }
@@ -1770,69 +1553,12 @@ pub(crate) fn insert_blank_commit(
             }
         }
     }
-    branch.updated_timestamp_ms = gitbutler_time::time::now_ms();
-    vb_state.set_branch(branch.clone())?;
 
     Ok(())
 }
 
-// remove a commit in a branch by rebasing all commits _except_ for it onto it's parent
-// if successful, it will update the branch head to the new head commit
-pub(crate) fn undo_commit(
-    ctx: &CommandContext,
-    branch_id: BranchId,
-    commit_oid: git2::Oid,
-) -> Result<Branch> {
-    let vb_state = ctx.project().virtual_branches();
-
-    let mut branch = vb_state.get_branch_in_workspace(branch_id)?;
-    let commit = ctx
-        .repository()
-        .find_commit(commit_oid)
-        .context("failed to find commit")?;
-
-    if commit.is_conflicted() {
-        bail!("Can not undo a conflicted commit");
-    }
-
-    let new_commit_oid;
-
-    if branch.head == commit_oid {
-        // if commit is the head, just set head to the parent
-        new_commit_oid = commit.parent(0).context("failed to find parent")?.id();
-    } else {
-        // if commit is not the head, rebase all commits above it onto it's parent
-        let parent_commit_oid = commit.parent(0).context("failed to find parent")?.id();
-
-        match cherry_rebase(ctx, parent_commit_oid, commit_oid, branch.head) {
-            Ok(Some(new_head)) => {
-                new_commit_oid = new_head;
-            }
-            Ok(None) => bail!("no rebase happened"),
-            Err(err) => {
-                return Err(err).context("rebase failed");
-            }
-        }
-    }
-
-    if new_commit_oid != commit_oid {
-        branch.head = new_commit_oid;
-        branch.updated_timestamp_ms = gitbutler_time::time::now_ms();
-        vb_state.set_branch(branch.clone())?;
-
-        crate::integration::update_workspace_commit(&vb_state, ctx)
-            .context("failed to update gitbutler workspace")?;
-    }
-
-    Ok(branch)
-}
-
 /// squashes a commit from a virtual branch into its parent.
-pub(crate) fn squash(
-    ctx: &CommandContext,
-    branch_id: BranchId,
-    commit_id: git2::Oid,
-) -> Result<()> {
+pub(crate) fn squash(ctx: &CommandContext, branch_id: StackId, commit_id: git2::Oid) -> Result<()> {
     ctx.assure_resolved()?;
 
     let vb_state = ctx.project().virtual_branches();
@@ -1840,7 +1566,7 @@ pub(crate) fn squash(
     let default_target = vb_state.get_default_target()?;
     let branch_commit_oids = ctx
         .repository()
-        .l(branch.head, LogUntil::Commit(default_target.sha))?;
+        .l(branch.head(), LogUntil::Commit(default_target.sha))?;
 
     if !branch_commit_oids.contains(&commit_id) {
         bail!("commit {commit_id} not in the branch")
@@ -1909,17 +1635,10 @@ pub(crate) fn squash(
     .with_context(|| format!("commit {commit_id} not in the branch"))?;
     let ids_to_rebase = ids_to_rebase.to_vec();
 
-    match cherry_rebase_group(
-        ctx.repository(),
-        new_commit_oid,
-        &ids_to_rebase,
-        ctx.project().succeeding_rebases,
-    ) {
+    match cherry_rebase_group(ctx.repository(), new_commit_oid, &ids_to_rebase) {
         Ok(new_head_id) => {
             // save new branch head
-            branch.head = new_head_id;
-            branch.updated_timestamp_ms = gitbutler_time::time::now_ms();
-            vb_state.set_branch(branch.clone())?;
+            branch.set_stack_head(ctx, new_head_id, None)?;
 
             crate::integration::update_workspace_commit(&vb_state, ctx)
                 .context("failed to update gitbutler workspace")?;
@@ -1932,7 +1651,7 @@ pub(crate) fn squash(
 // changes a commit message for commit_oid, rebases everything above it, updates branch head if successful
 pub(crate) fn update_commit_message(
     ctx: &CommandContext,
-    branch_id: BranchId,
+    branch_id: StackId,
     commit_id: git2::Oid,
     message: &str,
 ) -> Result<()> {
@@ -1947,7 +1666,7 @@ pub(crate) fn update_commit_message(
     let mut branch = vb_state.get_branch_in_workspace(branch_id)?;
     let branch_commit_oids = ctx
         .repository()
-        .l(branch.head, LogUntil::Commit(default_target.sha))?;
+        .l(branch.head(), LogUntil::Commit(default_target.sha))?;
 
     if !branch_commit_oids.contains(&commit_id) {
         bail!("commit {commit_id} not in the branch");
@@ -1995,155 +1714,13 @@ pub(crate) fn update_commit_message(
     .with_context(|| format!("commit {commit_id} not in the branch"))?;
     let ids_to_rebase = ids_to_rebase.to_vec();
 
-    let new_head_id = cherry_rebase_group(
-        ctx.repository(),
-        new_commit_oid,
-        &ids_to_rebase,
-        ctx.project().succeeding_rebases,
-    )
-    .map_err(|err| err.context("rebase error"))?;
+    let new_head_id = cherry_rebase_group(ctx.repository(), new_commit_oid, &ids_to_rebase)
+        .map_err(|err| err.context("rebase error"))?;
     // save new branch head
-    branch.head = new_head_id;
-    branch.updated_timestamp_ms = gitbutler_time::time::now_ms();
-    vb_state.set_branch(branch.clone())?;
+    branch.set_stack_head(ctx, new_head_id, None)?;
 
     crate::integration::update_workspace_commit(&vb_state, ctx)
         .context("failed to update gitbutler workspace")?;
-    Ok(())
-}
-
-/// moves commit from the branch it's in to the top of the target branch
-pub(crate) fn move_commit(
-    ctx: &CommandContext,
-    target_branch_id: BranchId,
-    commit_id: git2::Oid,
-) -> Result<()> {
-    ctx.assure_resolved()?;
-    let vb_state = ctx.project().virtual_branches();
-
-    let applied_branches = vb_state
-        .list_branches_in_workspace()
-        .context("failed to read virtual branches")?;
-
-    if !applied_branches.iter().any(|b| b.id == target_branch_id) {
-        bail!("branch {target_branch_id} is not among applied branches")
-    }
-
-    let mut applied_statuses = get_applied_status(ctx, None)?.branches;
-
-    let (ref mut source_branch, source_status) = applied_statuses
-        .iter_mut()
-        .find(|(b, _)| b.head == commit_id)
-        .ok_or_else(|| anyhow!("commit {commit_id} to be moved could not be found"))?;
-
-    let source_branch_non_comitted_files = source_status;
-
-    let source_branch_head = ctx
-        .repository()
-        .find_commit(commit_id)
-        .context("failed to find commit")?;
-
-    if source_branch_head.is_conflicted() {
-        bail!("Can not move conflicted commits");
-    }
-
-    let source_branch_head_parent = source_branch_head
-        .parent(0)
-        .context("failed to get parent commit")?;
-    let source_branch_head_tree = source_branch_head
-        .tree()
-        .context("failed to get commit tree")?;
-    let source_branch_head_parent_tree = source_branch_head_parent
-        .tree()
-        .context("failed to get parent tree")?;
-    let branch_head_diff = gitbutler_diff::trees(
-        ctx.repository(),
-        &source_branch_head_parent_tree,
-        &source_branch_head_tree,
-    )?;
-
-    let branch_head_diff: HashMap<_, _> =
-        gitbutler_diff::diff_files_into_hunks(branch_head_diff).collect();
-    let is_source_locked = source_branch_non_comitted_files.iter().any(|file| {
-        branch_head_diff
-            .get(&file.path)
-            .map_or(false, |head_diff_hunks| {
-                file.hunks.iter().any(|hunk| {
-                    let hunk: GitHunk = hunk.clone().into();
-                    head_diff_hunks.iter().any(|head_hunk| {
-                        joined(
-                            head_hunk.new_start,
-                            head_hunk.new_start + head_hunk.new_lines,
-                            hunk.new_start,
-                            hunk.new_start + hunk.new_lines,
-                        )
-                    })
-                })
-            })
-    });
-
-    if is_source_locked {
-        bail!("the source branch contains hunks locked to the target commit")
-    }
-
-    // move files ownerships from source branch to the destination branch
-
-    let ownerships_to_transfer = branch_head_diff
-        .iter()
-        .map(|(file_path, hunks)| {
-            (
-                file_path.clone(),
-                hunks.iter().map(Into::into).collect::<Vec<_>>(),
-            )
-        })
-        .map(|(file_path, hunks)| OwnershipClaim { file_path, hunks })
-        .flat_map(|file_ownership| source_branch.ownership.take(&file_ownership))
-        .collect::<Vec<_>>();
-
-    // reset the source branch to the parent commit
-    {
-        source_branch.head = source_branch_head_parent.id();
-        vb_state.set_branch(source_branch.clone())?;
-    }
-
-    // move the commit to destination branch target branch
-    {
-        let mut destination_branch = vb_state.get_branch_in_workspace(target_branch_id)?;
-
-        for ownership in ownerships_to_transfer {
-            destination_branch.ownership.put(ownership);
-        }
-
-        let new_destination_tree_oid = gitbutler_diff::write::hunks_onto_commit(
-            ctx,
-            destination_branch.head,
-            branch_head_diff,
-        )
-        .context("failed to write tree onto commit")?;
-        let new_destination_tree = ctx
-            .repository()
-            .find_tree(new_destination_tree_oid)
-            .context("failed to find tree")?;
-
-        let new_destination_head_oid = ctx
-            .commit(
-                &source_branch_head.message_bstr().to_str_lossy(),
-                &new_destination_tree,
-                &[&ctx
-                    .repository()
-                    .find_commit(destination_branch.head)
-                    .context("failed to get dst branch head commit")?],
-                source_branch_head.gitbutler_headers(),
-            )
-            .context("failed to commit")?;
-
-        destination_branch.head = new_destination_head_oid;
-        vb_state.set_branch(destination_branch.clone())?;
-    }
-
-    crate::integration::update_workspace_commit(&vb_state, ctx)
-        .context("failed to update gitbutler workspace")?;
-
     Ok(())
 }
 
@@ -2171,28 +1748,4 @@ fn update_conflict_markers(ctx: &CommandContext, files: Vec<VirtualBranchFile>) 
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn joined_test() {
-        assert!(!joined(1, 2, 3, 4));
-        assert!(joined(1, 4, 2, 3));
-        assert!(joined(2, 3, 1, 4));
-        assert!(!joined(3, 4, 1, 2));
-
-        assert!(joined(1, 2, 2, 3));
-        assert!(joined(1, 3, 2, 3));
-        assert!(joined(2, 3, 1, 2));
-
-        assert!(!joined(1, 1, 2, 2));
-        assert!(joined(1, 1, 1, 1));
-        assert!(joined(1, 1, 1, 2));
-        assert!(joined(1, 2, 2, 2));
-    }
-
-    #[test]
-    fn normalize_branch_name_test() {}
 }

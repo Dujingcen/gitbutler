@@ -1,7 +1,7 @@
 <script lang="ts">
 	import GitButler from '../images/gitbutler.svg';
 	import { AuthService } from '$lib/auth/authService';
-	import { getContext } from '$lib/utils/context';
+	import { getContext } from '@gitbutler/shared/context';
 	import { env } from '$env/dynamic/public';
 
 	const authService = getContext(AuthService);
@@ -23,9 +23,13 @@
 		<h2>GitButler</h2>
 	</a>
 	<div>
-		<a href="/user">User</a>
-		|
 		<a href="/downloads">Downloads</a>
+		{#if $token}
+			|
+			<a href="/projects">Projects</a>
+			|
+			<a href="/user">User</a>
+		{/if}
 	</div>
 	<div class="nav__right">
 		<button

@@ -4,12 +4,12 @@
 	import Icon from '$lib/Icon.svelte';
 	import Tooltip from '$lib/Tooltip.svelte';
 	import FileIcon from '$lib/file/FileIcon.svelte';
+	import { splitFilePath } from '$lib/utils/filePath';
 	import type { FileStatus } from './types';
 
 	interface Props {
 		ref?: HTMLDivElement;
 		id?: string;
-		fileName: string;
 		filePath: string;
 		fileStatus?: FileStatus;
 		fileStatusStyle?: 'dot' | 'full';
@@ -20,8 +20,10 @@
 		checked?: boolean;
 		indeterminate?: boolean;
 		conflicted?: boolean;
+		conflictHint?: string;
 		locked?: boolean;
 		lockText?: string;
+		stacking?: boolean;
 		oncheck?: (
 			e: Event & {
 				currentTarget: EventTarget & HTMLInputElement;
@@ -36,7 +38,6 @@
 	let {
 		ref = $bindable(),
 		id,
-		fileName,
 		filePath,
 		fileStatus,
 		fileStatusStyle = 'dot',
@@ -47,14 +48,18 @@
 		checked = $bindable(),
 		indeterminate,
 		conflicted,
+		conflictHint,
 		locked,
 		lockText,
+		stacking = false,
 		oncheck,
 		onclick,
 		onkeydown,
 		ondragstart,
 		oncontextmenu
 	}: Props = $props();
+
+	const fileInfo = $derived(splitFilePath(filePath));
 </script>
 
 <div
@@ -65,6 +70,7 @@
 	class:selected-draggable={selected}
 	class:clickable
 	class:draggable
+	class:stacking
 	aria-selected={selected}
 	role="option"
 	tabindex="-1"
@@ -86,12 +92,12 @@
 		<Checkbox small {checked} {indeterminate} onchange={oncheck} />
 	{/if}
 	<div class="info">
-		<FileIcon {fileName} size={14} />
+		<FileIcon fileName={fileInfo.filename} />
 		<span class="text-12 name">
-			{fileName}
+			{fileInfo.filename}
 		</span>
 		<span class="text-12 path">
-			{filePath}
+			{fileInfo.path}
 		</span>
 	</div>
 
@@ -105,9 +111,11 @@
 		{/if}
 
 		{#if conflicted}
-			<div class="conflicted">
-				<Icon name="warning-small" color="error" />
-			</div>
+			<Tooltip text={conflictHint}>
+				<div class="conflicted">
+					<Icon name="warning-small" color="error" />
+				</div>
+			</Tooltip>
 		{/if}
 
 		{#if fileStatus}
@@ -139,6 +147,15 @@
 
 		&:last-child {
 			border-bottom: none;
+		}
+
+		&.stacking {
+			background: transparent;
+			border-bottom: none;
+		}
+
+		&:not(:last-child).stacking {
+			border-bottom: 1px solid var(--clr-border-3);
 		}
 	}
 
@@ -215,8 +232,7 @@
 	}
 
 	/* MODIFIERS */
-
 	.selected-draggable {
-		background-color: var(--clr-theme-pop-bg);
+		background-color: var(--clr-theme-pop-bg) !important;
 	}
 </style>

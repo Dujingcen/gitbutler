@@ -2,10 +2,8 @@ use std::{path::PathBuf, vec};
 
 use anyhow::{anyhow, Context, Result};
 use bstr::ByteSlice;
-use gitbutler_branch::{
-    self, Branch, BranchCreateRequest, SignaturePurpose, VirtualBranchesHandle,
-    GITBUTLER_WORKSPACE_REFERENCE,
-};
+use gitbutler_branch::BranchCreateRequest;
+use gitbutler_branch::{self, SignaturePurpose, GITBUTLER_WORKSPACE_REFERENCE};
 use gitbutler_cherry_pick::RepositoryExt as _;
 use gitbutler_command_context::CommandContext;
 use gitbutler_commit::commit_ext::CommitExt;
@@ -13,6 +11,8 @@ use gitbutler_error::error::Marker;
 use gitbutler_operating_modes::OPEN_WORKSPACE_REFS;
 use gitbutler_project::access::WorktreeWritePermission;
 use gitbutler_repo::{LogUntil, RepositoryExt};
+use gitbutler_stack::{Stack, VirtualBranchesHandle};
+use gitbutler_stack_api::StackExt;
 use tracing::instrument;
 
 use crate::{branch_manager::BranchManagerExt, conflicts, VirtualBranchesExt};
@@ -37,7 +37,7 @@ pub(crate) fn get_workspace_head(ctx: &CommandContext) -> Result<git2::Oid> {
         .context("failed to get target")?;
     let repo: &git2::Repository = ctx.repository();
 
-    let mut virtual_branches: Vec<Branch> = vb_state.list_branches_in_workspace()?;
+    let mut virtual_branches: Vec<Stack> = vb_state.list_branches_in_workspace()?;
 
     let target_commit = repo.find_commit(target.sha)?;
     let mut workspace_tree = repo.find_real_tree(&target_commit, Default::default())?;
@@ -46,12 +46,12 @@ pub(crate) fn get_workspace_head(ctx: &CommandContext) -> Result<git2::Oid> {
         let merge_parent = conflicts::merge_parent(ctx)?.ok_or(anyhow!("No merge parent"))?;
         let first_branch = virtual_branches.first().ok_or(anyhow!("No branches"))?;
 
-        let merge_base = repo.merge_base(first_branch.head, merge_parent)?;
+        let merge_base = repo.merge_base(first_branch.head(), merge_parent)?;
         workspace_tree = repo.find_commit(merge_base)?.tree()?;
     } else {
         for branch in virtual_branches.iter_mut() {
             let merge_tree = repo.find_commit(target.sha)?.tree()?;
-            let branch_tree = repo.find_commit(branch.head)?;
+            let branch_tree = repo.find_commit(branch.head())?;
             let branch_tree = repo.find_real_tree(&branch_tree, Default::default())?;
 
             let mut index = repo.merge_trees(&merge_tree, &workspace_tree, &branch_tree, None)?;
@@ -71,8 +71,8 @@ pub(crate) fn get_workspace_head(ctx: &CommandContext) -> Result<git2::Oid> {
     let author = gitbutler_branch::signature(SignaturePurpose::Author)?;
     let mut heads: Vec<git2::Commit<'_>> = virtual_branches
         .iter()
-        .filter(|b| b.head != target.sha)
-        .map(|b| repo.find_commit(b.head))
+        .filter(|b| b.head() != target.sha)
+        .map(|b| repo.find_commit(b.head()))
         .filter_map(Result::ok)
         .collect();
 
@@ -153,7 +153,7 @@ pub fn update_workspace_commit(
     let vb_state = ctx.project().virtual_branches();
 
     // get all virtual branches, we need to try to update them all
-    let virtual_branches: Vec<Branch> = vb_state
+    let virtual_branches: Vec<Stack> = vb_state
         .list_branches_in_workspace()
         .context("failed to list virtual branches")?;
 
@@ -183,9 +183,9 @@ pub fn update_workspace_commit(
             message.push_str(format!(" ({})", &branch.refname()?).as_str());
             message.push('\n');
 
-            if branch.head != target.sha {
+            if branch.head() != target.sha {
                 message.push_str("   branch head: ");
-                message.push_str(&branch.head.to_string());
+                message.push_str(&branch.head().to_string());
                 message.push('\n');
             }
             for file in &branch.ownership.claims {
@@ -240,7 +240,7 @@ pub fn update_workspace_commit(
     // finally, update the refs/gitbutler/ heads to the states of the current virtual branches
     for branch in &virtual_branches {
         let wip_tree = repo.find_tree(branch.tree)?;
-        let mut branch_head = repo.find_commit(branch.head)?;
+        let mut branch_head = repo.find_commit(branch.head())?;
         let head_tree = branch_head.tree()?;
 
         // create a wip commit if there is wip
@@ -369,9 +369,7 @@ fn verify_head_is_clean(ctx: &CommandContext, perm: &mut WorktreeWritePermission
         .context("failed to create virtual branch")?;
 
     // rebasing the extra commits onto the new branch
-    let vb_state = ctx.project().virtual_branches();
-    // let mut head = new_branch.head;
-    let mut head = new_branch.head;
+    let mut head = new_branch.head();
     for commit in extra_commits {
         let new_branch_head = ctx
             .repository()
@@ -402,11 +400,7 @@ fn verify_head_is_clean(ctx: &CommandContext, perm: &mut WorktreeWritePermission
                 rebased_commit_oid
             ))?;
 
-        new_branch.head = rebased_commit.id();
-        new_branch.tree = rebased_commit.tree_id();
-        vb_state
-            .set_branch(new_branch.clone())
-            .context("failed to write branch")?;
+        new_branch.set_stack_head(ctx, rebased_commit.id(), Some(rebased_commit.tree_id()))?;
 
         head = rebased_commit.id();
     }

@@ -11,16 +11,17 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use bstr::ByteSlice;
 use git2::TreeEntry;
-use gitbutler_branch::{
-    BranchCreateRequest, BranchOwnershipClaims, BranchUpdateRequest, Target, VirtualBranchesHandle,
-};
+use gitbutler_branch::{BranchCreateRequest, BranchUpdateRequest};
 use gitbutler_branch_actions::{
     get_applied_status, internal, update_workspace_commit, verify_branch, BranchManagerExt, Get,
 };
 use gitbutler_commit::{commit_ext::CommitExt, commit_headers::CommitHeadersV2};
 use gitbutler_reference::{Refname, RemoteRefname};
 use gitbutler_repo::RepositoryExt;
+use gitbutler_stack::{BranchOwnershipClaims, Target, VirtualBranchesHandle};
+use gitbutler_stack_api::StackExt;
 use gitbutler_testsupport::{commit_all, virtual_branches::set_test_target, Case, Suite};
 use pretty_assertions::assert_eq;
 
@@ -754,6 +755,27 @@ fn commit_id_can_be_generated_or_specified() -> Result<()> {
     Ok(())
 }
 
+/// This sets up the following scenario:
+///
+/// Target commit:
+/// test.txt: line1\nline2\nline3\nline4\n
+///
+/// Make commit "last push":
+/// test.txt: line1\nline2\nline3\nline4\nupstream\n
+///
+/// "Server side" origin/master:
+/// test.txt: line1\nline2\nline3\nline4\nupstream\ncoworker work\n
+///
+/// Write uncommited:
+/// test.txt: line1\nline2\nline3\nline4\nupstream\n
+/// test2.txt: file2\n
+///
+/// Create vbranch:
+///    - set head to "last push"
+///
+/// Inspect Virtual branch:
+/// commited: test.txt: line1\nline2\nline3\nline4\n+upstream\n
+/// uncommited: test2.txt: file2\n
 #[test]
 fn merge_vbranch_upstream_clean_rebase() -> Result<()> {
     let suite = Suite::default();
@@ -821,24 +843,47 @@ fn merge_vbranch_upstream_clean_rebase() -> Result<()> {
     let mut branch = branch_manager
         .create_virtual_branch(&BranchCreateRequest::default(), guard.write_permission())
         .expect("failed to create virtual branch");
+
     branch.upstream = Some(remote_branch.clone());
-    branch.head = last_push;
-    vb_state.set_branch(branch.clone())?;
+    branch.set_stack_head(ctx, last_push, None)?;
 
     // create the branch
     let (branches, _) = internal::list_virtual_branches(ctx, guard.write_permission())?;
     assert_eq!(branches.len(), 1);
     let branch1 = &branches[0];
+
     assert_eq!(
         branch1.files.len(),
-        1 + 1,
-        "'test' (modified compared to index) and 'test2' (untracked).\
-        This is actually correct when looking at the git repository"
+        1,
+        "test2.txt contains uncommited changes"
     );
-    assert_eq!(branch1.commits.len(), 1);
+    assert_eq!(branch1.files[0].path.to_str().unwrap(), "test2.txt");
+    assert_eq!(
+        branch1.files[0].hunks[0].diff.to_str().unwrap(),
+        "@@ -0,0 +1 @@\n+file2\n"
+    );
+
+    assert_eq!(
+        branch1.commits.len(),
+        1,
+        "test.txt is commited inside this commit"
+    );
+    assert_eq!(branch1.commits[0].files.len(), 1);
+    assert_eq!(
+        branch1.commits[0].files[0].path.to_str().unwrap(),
+        "test.txt"
+    );
+    assert_eq!(
+        branch1.commits[0].files[0].hunks[0].diff.to_str().unwrap(),
+        "@@ -2,3 +2,4 @@ line1\n line2\n line3\n line4\n+upstream\n"
+    );
     // assert_eq!(branch1.upstream.as_ref().unwrap().commits.len(), 1);
 
-    internal::integrate_upstream_commits(ctx, branch1.id)?;
+    internal::branch_upstream_integration::integrate_upstream_commits(
+        ctx,
+        branch1.id,
+        guard.write_permission(),
+    )?;
 
     let (branches, _) = internal::list_virtual_branches(ctx, guard.write_permission())?;
     let branch1 = &branches[0];
@@ -928,8 +973,7 @@ fn merge_vbranch_upstream_conflict() -> Result<()> {
         .create_virtual_branch(&BranchCreateRequest::default(), guard.write_permission())
         .expect("failed to create virtual branch");
     branch.upstream = Some(remote_branch.clone());
-    branch.head = last_push;
-    vb_state.set_branch(branch.clone())?;
+    branch.set_stack_head(ctx, last_push, None)?;
 
     internal::update_branch(
         ctx,
@@ -949,45 +993,24 @@ fn merge_vbranch_upstream_conflict() -> Result<()> {
     assert_eq!(branch1.commits.len(), 1);
     // assert_eq!(branch1.upstream.as_ref().unwrap().commits.len(), 1);
 
-    internal::integrate_upstream_commits(ctx, branch1.id)?;
+    internal::branch_upstream_integration::integrate_upstream_commits(
+        ctx,
+        branch1.id,
+        guard.write_permission(),
+    )?;
 
     let (branches, _) = internal::list_virtual_branches(ctx, guard.write_permission())?;
     let branch1 = &branches[0];
     let contents = std::fs::read(Path::new(&project.path).join(file_path))?;
 
     assert_eq!(
-        "line1\nline2\nline3\nline4\nupstream\n<<<<<<< ours\nother side\n=======\ncoworker work\n>>>>>>> theirs\n",
+        "line1\nline2\nline3\nline4\nupstream\ncoworker work\n",
         String::from_utf8(contents)?
     );
 
-    assert_eq!(branch1.files.len(), 1);
-    assert_eq!(branch1.commits.len(), 1);
-    assert!(branch1.conflicted);
-
-    // fix the conflict
-    std::fs::write(
-        Path::new(&project.path).join(file_path),
-        "line1\nline2\nline3\nline4\nupstream\nother side\ncoworker work\n",
-    )?;
-
-    // make gb see the conflict resolution
-    update_workspace_commit(&vb_state, ctx)?;
-    let (branches, _) = internal::list_virtual_branches(ctx, guard.write_permission())?;
-    assert!(branches[0].conflicted);
-
-    // commit the merge resolution
-    internal::commit(ctx, branch1.id, "fix merge conflict", None, false)?;
-
-    let (branches, _) = internal::list_virtual_branches(ctx, guard.write_permission())?;
-    let branch1 = &branches[0];
-    assert!(!branch1.conflicted);
     assert_eq!(branch1.files.len(), 0);
-    assert_eq!(branch1.commits.len(), 3);
-
-    // make sure the last commit was a merge commit (2 parents)
-    let last_id = &branch1.commits[0].id;
-    let last_commit = ctx.repository().find_commit(last_id.to_owned())?;
-    assert_eq!(last_commit.parent_count(), 2);
+    assert_eq!(branch1.commits.len(), 4); // Local commit + Remote commit + Merge commit + Conflicted uncommited changes
+    assert!(!branch1.conflicted);
 
     Ok(())
 }

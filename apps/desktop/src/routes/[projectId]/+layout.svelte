@@ -7,9 +7,11 @@
 	import { BranchListingService, CombinedBranchListingService } from '$lib/branches/branchListing';
 	import { BranchDragActionsFactory } from '$lib/branches/dragActions';
 	import { CommitDragActionsFactory } from '$lib/commits/dragActions';
+	import { CommitService } from '$lib/commits/service';
 	import NoBaseBranch from '$lib/components/NoBaseBranch.svelte';
 	import NotOnGitButlerBranch from '$lib/components/NotOnGitButlerBranch.svelte';
 	import ProblemLoadingRepo from '$lib/components/ProblemLoadingRepo.svelte';
+	import { showHistoryView } from '$lib/config/config';
 	import { featureTopics } from '$lib/config/uiFeatureFlags';
 	import { ReorderDropzoneManagerFactory } from '$lib/dragging/reorderDropzoneManager';
 	import { DefaultGitHostFactory } from '$lib/gitHost/gitHostFactory';
@@ -21,7 +23,6 @@
 	import MetricsReporter from '$lib/metrics/MetricsReporter.svelte';
 	import { ModeService } from '$lib/modes/service';
 	import Navigation from '$lib/navigation/Navigation.svelte';
-	import { persisted } from '$lib/persisted/persisted';
 	import { RemoteBranchService } from '$lib/stores/remoteBranches';
 	import CreateIssueModal from '$lib/topics/CreateIssueModal.svelte';
 	import CreateTopicModal from '$lib/topics/CreateTopicModal.svelte';
@@ -66,6 +67,7 @@
 		setContext(VirtualBranchService, data.vbranchService);
 		setContext(BranchController, data.branchController);
 		setContext(BaseBranchService, data.baseBranchService);
+		setContext(CommitService, data.commitService);
 		setContext(BaseBranch, baseBranch);
 		setContext(Project, project);
 		setContext(BranchDragActionsFactory, data.branchDragActionsFactory);
@@ -80,7 +82,6 @@
 
 	let intervalId: any;
 
-	const showHistoryView = persisted(false, 'showHistoryView');
 	const octokit = $derived(accessToken ? octokitFromAccessToken(accessToken) : undefined);
 	const gitHostFactory = $derived(new DefaultGitHostFactory(octokit));
 	const repoInfo = $derived(remoteUrl ? parseRemoteUrl(remoteUrl) : undefined);
@@ -114,13 +115,16 @@
 
 	// TODO: can we eliminate the need to debounce?
 	const fetch = $derived(fetchSignal.event);
-	const debouncedBaseBranchRefresh = debounce(() => baseBranchService.refresh(), 500);
+	const debouncedBaseBranchRefresh = debounce(async () => await baseBranchService.refresh(), 500);
 	$effect(() => {
 		if ($fetch || $head) debouncedBaseBranchRefresh();
 	});
 
 	// TODO: can we eliminate the need to debounce?
-	const debouncedRemoteBranchRefresh = debounce(() => remoteBranchService.refresh(), 500);
+	const debouncedRemoteBranchRefresh = debounce(
+		async () => await remoteBranchService.refresh(),
+		500
+	);
 	$effect(() => {
 		if ($baseBranch || $head || $fetch) debouncedRemoteBranchRefresh();
 	});
@@ -175,10 +179,7 @@
 
 <!-- forces components to be recreated when projectId changes -->
 {#key projectId}
-	<ProjectSettingsMenuAction
-		showHistory={$showHistoryView}
-		onHistoryShow={(show) => ($showHistoryView = show)}
-	/>
+	<ProjectSettingsMenuAction />
 	<FileMenuAction />
 
 	{#if !project}

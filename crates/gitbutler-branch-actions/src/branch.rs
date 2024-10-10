@@ -2,15 +2,16 @@ use crate::{RemoteBranchFile, VirtualBranchesExt};
 use anyhow::{bail, Context, Result};
 use bstr::{BStr, ByteSlice};
 use core::fmt;
-use gitbutler_branch::{
-    Branch as GitButlerBranch, BranchId, BranchIdentity, ReferenceExtGix, Target,
-};
+use gitbutler_branch::BranchIdentity;
+use gitbutler_branch::ReferenceExtGix;
 use gitbutler_command_context::CommandContext;
 use gitbutler_diff::DiffByPathMap;
+use gitbutler_oxidize::{git2_to_gix_object_id, gix_to_git2_oid};
 use gitbutler_project::access::WorktreeReadPermission;
 use gitbutler_reference::normalize_branch_name;
 use gitbutler_repo::{GixRepositoryExt, RepositoryExt as _};
 use gitbutler_serde::BStringForFrontend;
+use gitbutler_stack::{Stack as GitButlerBranch, StackId, Target};
 use gix::object::tree::diff::Action;
 use gix::prelude::ObjectIdExt;
 use gix::reference::Category;
@@ -260,7 +261,7 @@ fn branch_group_to_branch(
     // If there is a virtual branch let's get it's head. Alternatively, pick the first local branch and use it's head.
     // If there are no local branches, pick the first remote branch.
     let head_commit = if let Some(vbranch) = virtual_branch {
-        Some(git2_to_gix_object_id(vbranch.head).attach(repo))
+        Some(git2_to_gix_object_id(vbranch.head()).attach(repo))
     } else if let Some(mut branch) = local_branches.into_iter().next() {
         branch.peel_to_id_in_place_packed(packed).ok()
     } else if let Some(mut branch) = remote_branches.into_iter().next() {
@@ -288,14 +289,6 @@ fn branch_group_to_branch(
         has_local,
         head,
     }))
-}
-
-fn gix_to_git2_oid(id: impl Into<gix::ObjectId>) -> git2::Oid {
-    git2::Oid::from_bytes(id.into().as_bytes()).expect("always valid")
-}
-
-fn git2_to_gix_object_id(id: git2::Oid) -> gix::ObjectId {
-    gix::ObjectId::try_from(id.as_bytes()).expect("git2 oid is always valid")
 }
 
 /// A sum type of branch that can be a plain git branch or a virtual branch
@@ -444,7 +437,7 @@ pub struct VirtualBranchReference {
     /// A non-normalized name of the branch, set by the user
     pub given_name: String,
     /// Virtual Branch UUID identifier
-    pub id: BranchId,
+    pub id: StackId,
     /// Determines if the virtual branch is applied in the workspace
     pub in_workspace: bool,
 }

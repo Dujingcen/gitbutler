@@ -1,11 +1,11 @@
 import { resetPostHog, setPostHogUser } from '$lib/analytics/posthog';
 import { resetSentry, setSentryUser } from '$lib/analytics/sentry';
-import { API_URL, type HttpClient } from '$lib/backend/httpClient';
 import { invoke } from '$lib/backend/ipc';
 import { showError } from '$lib/notifications/toasts';
 import { copyToClipboard } from '$lib/utils/clipboard';
 import { sleep } from '$lib/utils/sleep';
 import { openExternalUrl } from '$lib/utils/url';
+import { type HttpClient } from '@gitbutler/shared/httpClient';
 import { plainToInstance } from 'class-transformer';
 import { derived, writable } from 'svelte/store';
 
@@ -64,7 +64,7 @@ export class UserService {
 			// Create login token
 			const token = await this.httpClient.post<LoginToken>('login/token.json');
 			const url = new URL(token.url);
-			url.host = API_URL.host;
+			url.host = this.httpClient.apiUrl.host;
 
 			action(url.toString());
 
@@ -137,9 +137,9 @@ export class User {
 	name: string | undefined;
 	given_name: string | undefined;
 	family_name: string | undefined;
-	email!: string;
+	email!: string | undefined;
 	picture!: string;
-	locale!: string;
+	locale!: string | undefined;
 	created_at!: string;
 	updated_at!: string;
 	access_token!: string;

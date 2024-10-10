@@ -1,7 +1,11 @@
 import { AnthropicAIClient } from '$lib/ai/anthropicClient';
 import { ButlerAIClient } from '$lib/ai/butlerClient';
 import { OpenAIClient } from '$lib/ai/openAIClient';
-import { SHORT_DEFAULT_BRANCH_TEMPLATE, SHORT_DEFAULT_COMMIT_TEMPLATE } from '$lib/ai/prompts';
+import {
+	SHORT_DEFAULT_BRANCH_TEMPLATE,
+	SHORT_DEFAULT_COMMIT_TEMPLATE,
+	SHORT_DEFAULT_PR_TEMPLATE
+} from '$lib/ai/prompts';
 import { AISecretHandle, AIService, GitAIConfigKey, KeyOption, buildDiff } from '$lib/ai/service';
 import {
 	AnthropicModelName,
@@ -10,9 +14,9 @@ import {
 	type AIClient,
 	type Prompt
 } from '$lib/ai/types';
-import { HttpClient } from '$lib/backend/httpClient';
 import { buildFailureFromAny, ok, unwrap, type Result } from '$lib/result';
 import { Hunk } from '$lib/vbranches/types';
+import { HttpClient } from '@gitbutler/shared/httpClient';
 import { plainToInstance } from 'class-transformer';
 import { expect, test, describe, vi } from 'vitest';
 import type { GbConfig, GitConfigService } from '$lib/backend/gitConfigService';
@@ -71,11 +75,13 @@ class DummySecretsService implements SecretsService {
 }
 
 const fetchMock = vi.fn();
-const cloud = new HttpClient(fetchMock);
+const cloud = new HttpClient(fetchMock, 'https://www.example.com');
 
 class DummyAIClient implements AIClient {
 	defaultCommitTemplate = SHORT_DEFAULT_COMMIT_TEMPLATE;
 	defaultBranchTemplate = SHORT_DEFAULT_BRANCH_TEMPLATE;
+	defaultPRTemplate = SHORT_DEFAULT_PR_TEMPLATE;
+
 	constructor(private response = 'lorem ipsum') {}
 
 	async evaluate(_prompt: Prompt): Promise<Result<string, Error>> {

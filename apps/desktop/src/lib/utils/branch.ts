@@ -1,16 +1,26 @@
-import { entries, type UnknowObject } from './object';
-
 const PREFERRED_REMOTE = 'origin';
 const BRANCH_SEPARATOR = '/';
 const REF_REMOTES_PREFIX = 'refs/remotes/';
 
-export function getBranchNameFromRef(ref: string): string | undefined {
+/**
+ * Get the branch name from a refname.
+ *
+ * If a remote is provided, the remote prefix will be removed.
+ */
+export function getBranchNameFromRef(ref: string, remote?: string): string | undefined {
 	if (ref.startsWith(REF_REMOTES_PREFIX)) {
-		ref = ref.slice(REF_REMOTES_PREFIX.length);
+		ref = ref.replace(REF_REMOTES_PREFIX, '');
 	}
 
-	const parts = ref.split(BRANCH_SEPARATOR);
-	return parts.length > 1 ? parts.slice(1).join(BRANCH_SEPARATOR) : ref;
+	if (remote !== undefined) {
+		const originPrefix = `${remote}${BRANCH_SEPARATOR}`;
+		if (!ref.startsWith(originPrefix)) {
+			throw new Error('Failed to parse branch name as reference');
+		}
+		ref = ref.replace(originPrefix, '');
+	}
+
+	return ref;
 }
 
 export function getBranchRemoteFromRef(ref: string): string | undefined {
@@ -22,14 +32,14 @@ export function getBranchRemoteFromRef(ref: string): string | undefined {
 	return parts.length > 1 ? parts[0] : undefined;
 }
 
-const BRANCH_RANKING_EXACT: UnknowObject<number> = {
+const BRANCH_RANKING_EXACT: Record<string, number> = {
 	'upstream/main': 100,
 	'upstream/master': 100,
 	'origin/main': 90,
 	'origin/master': 90
 };
 
-const BRANCH_RANKING_ENDS_WITH: UnknowObject<number> = {
+const BRANCH_RANKING_ENDS_WITH: Record<string, number> = {
 	'/master': 70,
 	'/main': 70
 };
@@ -40,7 +50,7 @@ function branchRank(branchName: string): number {
 		return exactMatch;
 	}
 
-	for (const [key, value] of entries(BRANCH_RANKING_ENDS_WITH)) {
+	for (const [key, value] of Object.entries(BRANCH_RANKING_ENDS_WITH)) {
 		if (branchName.endsWith(key)) {
 			return value;
 		}

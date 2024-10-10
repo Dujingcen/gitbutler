@@ -5,14 +5,12 @@
 	import { BaseBranch } from '$lib/baseBranch/baseBranch';
 	import CommitMessageInput from '$lib/commit/CommitMessageInput.svelte';
 	import { persistedCommitMessage } from '$lib/config/config';
-	import { stackingFeature } from '$lib/config/uiFeatureFlags';
 	import { draggableCommit } from '$lib/dragging/draggable';
 	import { DraggableCommit, nonDraggable } from '$lib/dragging/draggables';
 	import BranchFilesList from '$lib/file/BranchFilesList.svelte';
 	import { ModeService } from '$lib/modes/service';
 	import TextBox from '$lib/shared/TextBox.svelte';
 	import { copyToClipboard } from '$lib/utils/clipboard';
-	import { getContext, getContextStore, maybeGetContext } from '$lib/utils/context';
 	import { openExternalUrl } from '$lib/utils/url';
 	import { BranchController } from '$lib/vbranches/branchController';
 	import { createCommitStore } from '$lib/vbranches/contexts';
@@ -24,6 +22,7 @@
 		VirtualBranch,
 		type CommitStatus
 	} from '$lib/vbranches/types';
+	import { getContext, getContextStore, maybeGetContext } from '@gitbutler/shared/context';
 	import Button from '@gitbutler/ui/Button.svelte';
 	import Icon from '@gitbutler/ui/Icon.svelte';
 	import Modal from '@gitbutler/ui/Modal.svelte';
@@ -52,9 +51,12 @@
 	const currentCommitMessage = persistedCommitMessage(project.id, branch?.id || '');
 
 	let draggableCommitElement: HTMLElement | null = null;
-	let contextMenu: CommitContextMenu;
+	let contextMenu: ReturnType<typeof CommitContextMenu> | undefined;
 	let files: RemoteFile[] = [];
 	let showDetails = false;
+
+	$: conflicted = commit.conflicted;
+	$: isAncestorMostConflicted = branch?.ancestorMostConflictedCommit?.id === commit.id;
 
 	async function loadFiles() {
 		files = await listRemoteCommitFiles(project.id, commit.id);
@@ -92,16 +94,7 @@
 	let createRefModal: Modal;
 	let createRefName = $baseBranch.remoteName + '/';
 
-	function openCreateRefModal(e: Event, commit: DetailedCommit | Commit) {
-		e.stopPropagation();
-		createRefModal.show(commit);
-	}
-
-	function pushCommitRef(commit: DetailedCommit) {
-		if (branch && commit.remoteRef) {
-			branchController.pushChangeReference(branch.id, commit.remoteRef);
-		}
-	}
+	let conflictResolutionConfirmationModal: ReturnType<typeof Modal> | undefined;
 
 	function openCommitMessageModal(e: Event) {
 		e.stopPropagation();
@@ -150,11 +143,16 @@
 
 	async function editPatch() {
 		if (!canEdit()) return;
-
 		modeService!.enterEditMode(commit.id, branch!.refname);
 	}
 
-	$: conflicted = commit instanceof DetailedCommit && commit.conflicted;
+	async function handleEditPatch() {
+		if (conflicted && !isAncestorMostConflicted) {
+			conflictResolutionConfirmationModal?.show();
+			return;
+		}
+		await editPatch();
+	}
 </script>
 
 <Modal bind:this={commitMessageModal} width="small" onSubmit={submitCommitMessageModal}>
@@ -165,6 +163,7 @@
 			bind:valid={commitMessageValid}
 			isExpanded={true}
 			cancel={close}
+			commit={submitCommitMessageModal}
 		/>
 	{/snippet}
 	{#snippet controls(close)}
@@ -195,6 +194,20 @@
 	{/snippet}
 	{#snippet controls(close)}
 		<Button style="ghost" outline type="reset" onclick={close}>Cancel</Button>
+	{/snippet}
+</Modal>
+
+<Modal bind:this={conflictResolutionConfirmationModal} width="small" onSubmit={editPatch}>
+	{#snippet children()}
+		<div>
+			<p>It's generally better to start resolving conflicts from the bottom up.</p>
+			<br />
+			<p>Are you sure you want to resolve conflicts for this commit?</p>
+		</div>
+	{/snippet}
+	{#snippet controls(close)}
+		<Button style="ghost" outline type="reset" onclick={close}>Cancel</Button>
+		<Button style="pop" outline type="submit">Yes</Button>
 	{/snippet}
 </Modal>
 
@@ -239,7 +252,7 @@
 				role="button"
 				tabindex="0"
 				on:contextmenu={(e) => {
-					contextMenu.open(e);
+					contextMenu?.open(e);
 				}}
 				on:dragenter={() => {
 					isDragTargeted = true;
@@ -266,7 +279,8 @@
 					? {
 							label: commit.descriptionTitle,
 							sha: commitShortSha,
-							dateAndAuthor: getTimeAndAuthor(),
+							date: getTimeAgo(commit.createdAt),
+							authorImgUrl: commit.author.gravatarUrl,
 							commitType: type,
 							data: new DraggableCommit(commit.branchId, commit, isHeadCommit),
 							viewportId: 'board-viewport'
@@ -395,8 +409,7 @@
 												currentCommitMessage.set(commit.description);
 												e.stopPropagation();
 												undoCommit(commit);
-											}}
-											>Undo</Button
+											}}>Uncommit</Button
 										>
 									{/if}
 									<Button
@@ -406,29 +419,9 @@
 										icon="edit-small"
 										onclick={openCommitMessageModal}>Edit message</Button
 									>
-									{#if $stackingFeature && commit instanceof DetailedCommit && !commit.remoteRef}
-										<Button
-											size="tag"
-											style="ghost"
-											outline
-											icon="branch"
-											onclick={(e: Event) => {openCreateRefModal(e, commit)}}>Create ref</Button
-										>
-									{/if}
-									{#if $stackingFeature && commit instanceof DetailedCommit && commit.remoteRef}
-										<Button
-											size="tag"
-											style="ghost"
-											outline
-											icon="remote"
-											onclick={() => {
-												pushCommitRef(commit);
-											}}>Push ref</Button
-										>
-									{/if}
 								{/if}
-								{#if canEdit() && project.succeedingRebases}
-									<Button size="tag" style="ghost" outline onclick={editPatch}>
+								{#if canEdit()}
+									<Button size="tag" style="ghost" outline onclick={handleEditPatch}>
 										{#if conflicted}
 											Resolve conflicts
 										{:else}
@@ -447,6 +440,7 @@
 						{files}
 						{isUnapplied}
 						readonly={type === 'remote' || isUnapplied}
+						conflictedFiles={commit.conflictedFiles}
 					/>
 				</div>
 			{/if}

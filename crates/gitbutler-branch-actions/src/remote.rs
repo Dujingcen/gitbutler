@@ -2,12 +2,13 @@ use std::path::Path;
 
 use crate::author::Author;
 use anyhow::{Context, Result};
-use gitbutler_branch::{ReferenceExt, Target, VirtualBranchesHandle};
+use gitbutler_branch::ReferenceExt;
 use gitbutler_command_context::CommandContext;
 use gitbutler_commit::commit_ext::CommitExt;
 use gitbutler_reference::{Refname, RemoteRefname};
 use gitbutler_repo::{LogUntil, RepoActionsExt, RepositoryExt};
 use gitbutler_serde::BStringForFrontend;
+use gitbutler_stack::{Target, VirtualBranchesHandle};
 use serde::Serialize;
 
 /// this struct is a mapping to the view `RemoteBranch` type in Typescript
@@ -55,6 +56,7 @@ pub struct RemoteCommit {
     pub change_id: Option<String>,
     #[serde(with = "gitbutler_serde::oid_vec")]
     pub parent_ids: Vec<git2::Oid>,
+    pub conflicted: bool,
 }
 
 /// Return information on all local branches, while skipping gitbutler-specific branches in `refs/heads`.
@@ -103,11 +105,28 @@ pub(crate) fn get_branch_data(ctx: &CommandContext, refname: &Refname) -> Result
 
     let branch = ctx
         .repository()
-        .find_branch_by_refname(refname)?
+        .maybe_find_branch_by_refname(refname)?
         .ok_or(anyhow::anyhow!("failed to find branch {}", refname))?;
 
     branch_to_remote_branch_data(ctx, &branch, default_target.sha)?
         .context("failed to get branch data")
+}
+
+pub(crate) fn get_commit_data(
+    ctx: &CommandContext,
+    sha: git2::Oid,
+) -> Result<Option<RemoteCommit>> {
+    let commit = match ctx.repository().find_commit(sha) {
+        Ok(commit) => commit,
+        Err(error) => {
+            if error.code() == git2::ErrorCode::NotFound {
+                return Ok(None);
+            } else {
+                anyhow::bail!(error);
+            }
+        }
+    };
+    Ok(Some(commit_to_remote_commit(&commit)))
 }
 
 pub(crate) fn branch_to_remote_branch(
@@ -189,6 +208,7 @@ pub(crate) fn commit_to_remote_commit(commit: &git2::Commit) -> RemoteCommit {
         author: commit.author().into(),
         change_id: commit.change_id(),
         parent_ids,
+        conflicted: commit.is_conflicted(),
     }
 }
 

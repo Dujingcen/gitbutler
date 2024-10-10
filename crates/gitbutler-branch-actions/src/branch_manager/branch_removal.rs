@@ -2,12 +2,13 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use git2::Commit;
-use gitbutler_branch::{Branch, BranchExt, BranchId, SignaturePurpose};
+use gitbutler_branch::{BranchExt, SignaturePurpose};
 use gitbutler_commit::commit_headers::CommitHeadersV2;
 use gitbutler_oplog::SnapshotExt;
 use gitbutler_project::access::WorktreeWritePermission;
 use gitbutler_reference::{normalize_branch_name, ReferenceName, Refname};
 use gitbutler_repo::{RepoActionsExt, RepositoryExt};
+use gitbutler_stack::{Stack, StackId};
 use tracing::instrument;
 
 use super::BranchManager;
@@ -24,7 +25,7 @@ impl BranchManager<'_> {
     #[instrument(level = tracing::Level::DEBUG, skip(self, perm), err(Debug))]
     pub fn save_and_unapply(
         &self,
-        branch_id: BranchId,
+        branch_id: StackId,
         perm: &mut WorktreeWritePermission,
     ) -> Result<ReferenceName> {
         let vb_state = self.ctx.project().virtual_branches();
@@ -54,7 +55,7 @@ impl BranchManager<'_> {
     #[instrument(level = tracing::Level::DEBUG, skip(self, perm), err(Debug))]
     pub(crate) fn unapply_without_saving(
         &self,
-        branch_id: BranchId,
+        branch_id: StackId,
         perm: &mut WorktreeWritePermission,
         target_commit: &Commit,
     ) -> Result<()> {
@@ -108,7 +109,7 @@ impl BranchManager<'_> {
                             .map(|file| (file.path, file.hunks))
                             .collect::<Vec<(PathBuf, Vec<VirtualBranchHunk>)>>();
                         let tree_oid =
-                            gitbutler_diff::write::hunks_onto_oid(self.ctx, branch.head, files)?;
+                            gitbutler_diff::write::hunks_onto_oid(self.ctx, branch.head(), files)?;
                         let branch_tree = repo.find_tree(tree_oid)?;
                         let mut result =
                             repo.merge_trees(&base_tree, &final_tree, &branch_tree, None)?;
@@ -145,9 +146,9 @@ impl BranchManager<'_> {
 
 impl BranchManager<'_> {
     #[instrument(level = tracing::Level::DEBUG, skip(self, vbranch), err(Debug))]
-    fn build_real_branch(&self, vbranch: &mut Branch) -> Result<git2::Branch<'_>> {
+    fn build_real_branch(&self, vbranch: &mut Stack) -> Result<git2::Branch<'_>> {
         let repo = self.ctx.repository();
-        let target_commit = repo.find_commit(vbranch.head)?;
+        let target_commit = repo.find_commit(vbranch.head())?;
         let branch_name = vbranch.name.clone();
         let branch_name = normalize_branch_name(&branch_name)?;
 
@@ -163,14 +164,14 @@ impl BranchManager<'_> {
 
     fn build_wip_commit(
         &self,
-        vbranch: &mut Branch,
+        vbranch: &mut Stack,
         branch: &git2::Branch<'_>,
     ) -> Result<Option<git2::Oid>> {
         let repo = self.ctx.repository();
 
         // Build wip tree as either any uncommitted changes or an empty tree
         let vbranch_wip_tree = repo.find_tree(vbranch.tree)?;
-        let vbranch_head_tree = repo.find_commit(vbranch.head)?.tree()?;
+        let vbranch_head_tree = repo.find_commit(vbranch.head())?.tree()?;
 
         let tree = if vbranch_head_tree.id() != vbranch_wip_tree.id() {
             vbranch_wip_tree

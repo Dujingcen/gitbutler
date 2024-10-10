@@ -1,11 +1,11 @@
 <script lang="ts">
 	import CommitMessageInput from './CommitMessageInput.svelte';
 	import { persistedCommitMessage, projectRunCommitHooks } from '$lib/config/config';
-	import { getContext, getContextStore } from '$lib/utils/context';
 	import { intersectionObserver } from '$lib/utils/intersectionObserver';
 	import { BranchController } from '$lib/vbranches/branchController';
 	import { SelectedOwnership } from '$lib/vbranches/ownership';
 	import { VirtualBranch } from '$lib/vbranches/types';
+	import { getContext, getContextStore } from '@gitbutler/shared/context';
 	import Button from '@gitbutler/ui/Button.svelte';
 	import { slideFade } from '@gitbutler/ui/utils/transitions';
 	import type { Writable } from 'svelte/store';
@@ -119,6 +119,7 @@
 		padding: 14px;
 		background: var(--clr-bg-1);
 		border-top: 1px solid var(--clr-border-2);
+		border-radius: 0 0 var(--radius-m) var(--radius-m) !important;
 		transition: background-color var(--transition-medium);
 	}
 

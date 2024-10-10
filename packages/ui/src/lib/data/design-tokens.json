@@ -3476,12 +3476,12 @@
 			},
 			"local": {
 				"$type": "color",
-				"$value": "{clr-core.pop.50}",
+				"$value": "{clr-core.ntrl.50}",
 				"$description": "",
 				"$extensions": {
 					"mode": {
-						"light": "{clr-core.pop.50}",
-						"dark": "{clr-core.pop.50}"
+						"light": "{clr-core.ntrl.50}",
+						"dark": "{clr-core.ntrl.50}"
 					},
 					"figma": {
 						"variableId": "VariableID:3171:9428",
@@ -3495,12 +3495,12 @@
 			},
 			"remote": {
 				"$type": "color",
-				"$value": "{clr-core.ntrl.50}",
+				"$value": "{clr-core.pop.50}",
 				"$description": "",
 				"$extensions": {
 					"mode": {
-						"light": "{clr-core.ntrl.50}",
-						"dark": "{clr-core.ntrl.50}"
+						"light": "{clr-core.pop.50}",
+						"dark": "{clr-core.pop.50}"
 					},
 					"figma": {
 						"variableId": "VariableID:3171:9429",
@@ -3523,6 +3523,25 @@
 					},
 					"figma": {
 						"variableId": "VariableID:3172:9430",
+						"collection": {
+							"id": "VariableCollectionId:8:1868",
+							"name": "clr",
+							"defaultModeId": "8:5"
+						}
+					}
+				}
+			},
+			"integrated": {
+				"$type": "color",
+				"$value": "{clr-core.purp.50}",
+				"$description": "",
+				"$extensions": {
+					"mode": {
+						"light": "{clr-core.purp.50}",
+						"dark": "{clr-core.purp.40}"
+					},
+					"figma": {
+						"variableId": "VariableID:4666:4125",
 						"collection": {
 							"id": "VariableCollectionId:8:1868",
 							"name": "clr",
@@ -3652,11 +3671,11 @@
 			"selected": {
 				"count-bg": {
 					"$type": "color",
-					"$value": "{clr-core.pop.70}",
+					"$value": "{clr-core.pop.80}",
 					"$description": "",
 					"$extensions": {
 						"mode": {
-							"light": "{clr-core.pop.70}",
+							"light": "{clr-core.pop.80}",
 							"dark": "{clr-core.pop.10}"
 						},
 						"figma": {
@@ -3961,6 +3980,65 @@
 					}
 				}
 			}
+		},
+		"stack-tab": {
+			"active": {
+				"$type": "color",
+				"$value": "{clr.bg.1}",
+				"$description": "",
+				"$extensions": {
+					"mode": {
+						"light": "{clr.bg.1}",
+						"dark": "{clr.bg.1}"
+					},
+					"figma": {
+						"variableId": "VariableID:4766:20135",
+						"collection": {
+							"id": "VariableCollectionId:8:1868",
+							"name": "clr",
+							"defaultModeId": "8:5"
+						}
+					}
+				}
+			},
+			"inactive": {
+				"$type": "color",
+				"$value": "{clr.bg.2}",
+				"$description": "",
+				"$extensions": {
+					"mode": {
+						"light": "{clr.bg.2}",
+						"dark": "{clr.bg.2}"
+					},
+					"figma": {
+						"variableId": "VariableID:4766:20450",
+						"collection": {
+							"id": "VariableCollectionId:8:1868",
+							"name": "clr",
+							"defaultModeId": "8:5"
+						}
+					}
+				}
+			},
+			"inactive-hover": {
+				"$type": "color",
+				"$value": "{clr.scale.ntrl.95}",
+				"$description": "",
+				"$extensions": {
+					"mode": {
+						"light": "{clr.scale.ntrl.95}",
+						"dark": "{clr-core.ntrl.10}"
+					},
+					"figma": {
+						"variableId": "VariableID:4766:20452",
+						"collection": {
+							"id": "VariableCollectionId:8:1868",
+							"name": "clr",
+							"defaultModeId": "8:5"
+						}
+					}
+				}
+			}
 		}
 	},
 	"size": {
@@ -4093,42 +4171,64 @@
 					}
 				}
 			}
+		},
+		"ml": {
+			"$type": "dimension",
+			"$value": "10px",
+			"$description": "",
+			"$extensions": {
+				"mode": {},
+				"figma": {
+					"variableId": "VariableID:4733:2863",
+					"collection": {
+						"id": "VariableCollectionId:137:11511",
+						"name": "radius",
+						"defaultModeId": "137:3"
+					}
+				}
+			}
 		}
 	},
 	"fx": {
 		"shadow": {
 			"s": {
 				"$type": "shadow",
-				"$value": {
-					"inset": false,
-					"color": "#0000000f",
-					"offsetX": "0px",
-					"offsetY": "4px",
-					"blur": "14px",
-					"spread": "0px"
-				}
+				"$value": [
+					{
+						"inset": false,
+						"color": "#0000000f",
+						"offsetX": "0px",
+						"offsetY": "4px",
+						"blur": "14px",
+						"spread": "0px"
+					}
+				]
 			},
 			"m": {
 				"$type": "shadow",
-				"$value": {
-					"inset": false,
-					"color": "#00000014",
-					"offsetX": "0px",
-					"offsetY": "6px",
-					"blur": "30px",
-					"spread": "0px"
-				}
+				"$value": [
+					{
+						"inset": false,
+						"color": "#00000014",
+						"offsetX": "0px",
+						"offsetY": "6px",
+						"blur": "30px",
+						"spread": "0px"
+					}
+				]
 			},
 			"l": {
 				"$type": "shadow",
-				"$value": {
-					"inset": false,
-					"color": "#0000001a",
-					"offsetX": "0px",
-					"offsetY": "10px",
-					"blur": "40px",
-					"spread": "0px"
-				}
+				"$value": [
+					{
+						"inset": false,
+						"color": "#0000001a",
+						"offsetX": "0px",
+						"offsetY": "10px",
+						"blur": "40px",
+						"spread": "0px"
+					}
+				]
 			}
 		}
 	},
@@ -4137,7 +4237,7 @@
 			"useDTCGKeys": true,
 			"colorMode": "hex",
 			"variableCollections": ["clr-core", "clr", "size", "radius"],
-			"createdAt": "2024-09-11T23:46:21.639Z"
+			"createdAt": "2024-10-09T14:46:18.350Z"
 		}
 	}
 }

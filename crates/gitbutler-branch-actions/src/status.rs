@@ -9,20 +9,21 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use git2::Tree;
-use gitbutler_branch::{
-    Branch, BranchCreateRequest, BranchId, BranchOwnershipClaims, OwnershipClaim,
-};
+use gitbutler_branch::BranchCreateRequest;
 use gitbutler_cherry_pick::RepositoryExt as _;
 use gitbutler_command_context::CommandContext;
 use gitbutler_diff::{diff_files_into_hunks, GitHunk, Hunk, HunkHash};
 use gitbutler_operating_modes::assure_open_workspace_mode;
 use gitbutler_project::access::WorktreeWritePermission;
+use gitbutler_stack::{BranchOwnershipClaims, OwnershipClaim, Stack, StackId};
+use gitbutler_stack_api::StackExt;
 use tracing::instrument;
 
 /// Represents the uncommitted status of the applied virtual branches in the workspace.
+#[derive(Debug)]
 pub struct VirtualBranchesStatus {
     /// A collection of branches and their associated uncommitted file changes.
-    pub branches: Vec<(Branch, Vec<VirtualBranchFile>)>,
+    pub branches: Vec<(Stack, Vec<VirtualBranchFile>)>,
     /// A collection of files that were skipped during the diffing process (due to being very large and unprocessable).
     pub skipped_files: Vec<gitbutler_diff::FileDiff>,
 }
@@ -83,7 +84,7 @@ pub fn get_applied_status_cached(
         }
     }
 
-    let mut diffs_by_branch: HashMap<BranchId, HashMap<PathBuf, Vec<gitbutler_diff::GitHunk>>> =
+    let mut diffs_by_branch: HashMap<StackId, HashMap<PathBuf, Vec<gitbutler_diff::GitHunk>>> =
         virtual_branches
             .iter()
             .map(|branch| (branch.id, HashMap::new()))
@@ -97,6 +98,9 @@ pub fn get_applied_status_cached(
     let locks = compute_locks(ctx.repository(), &base_diffs, &virtual_branches, base_tree)?;
 
     for branch in &mut virtual_branches {
+        if let Err(e) = branch.initialize(ctx) {
+            tracing::warn!("failed to initialize stack: {:?}", e);
+        }
         let old_claims = branch.ownership.claims.clone();
         let new_claims = old_claims
             .iter()
@@ -213,13 +217,13 @@ pub fn get_applied_status_cached(
     // write updated state if not resolving
     if !ctx.is_resolving() {
         for (vbranch, files) in &mut hunks_by_branch {
-            vbranch.tree = gitbutler_diff::write::hunks_onto_oid(ctx, vbranch.head, files)?;
+            vbranch.tree = gitbutler_diff::write::hunks_onto_oid(ctx, vbranch.head(), files)?;
             vb_state
                 .set_branch(vbranch.clone())
                 .context(format!("failed to write virtual branch {}", vbranch.name))?;
         }
     }
-    let hunks_by_branch: Vec<(Branch, HashMap<PathBuf, Vec<VirtualBranchHunk>>)> = hunks_by_branch
+    let hunks_by_branch: Vec<(Stack, HashMap<PathBuf, Vec<VirtualBranchHunk>>)> = hunks_by_branch
         .iter()
         .map(|(branch, hunks)| {
             let hunks = file_hunks_from_diffs(&ctx.project().path, hunks.clone(), Some(&locks));
@@ -227,7 +231,7 @@ pub fn get_applied_status_cached(
         })
         .collect();
 
-    let files_by_branch: Vec<(Branch, Vec<VirtualBranchFile>)> = hunks_by_branch
+    let files_by_branch: Vec<(Stack, Vec<VirtualBranchFile>)> = hunks_by_branch
         .iter()
         .map(|(branch, hunks)| {
             let files = virtual_hunks_into_virtual_files(ctx, hunks.clone());
@@ -244,7 +248,7 @@ pub fn get_applied_status_cached(
 fn compute_locks(
     repository: &git2::Repository,
     unstaged_hunks_by_path: &HashMap<PathBuf, Vec<gitbutler_diff::GitHunk>>,
-    virtual_branches: &[Branch],
+    virtual_branches: &[Stack],
     base_tree: Tree,
 ) -> Result<HashMap<HunkHash, Vec<HunkLock>>> {
     let mut diff_opts = git2::DiffOptions::new();
@@ -256,7 +260,7 @@ fn compute_locks(
     let branch_path_diffs = virtual_branches
         .iter()
         .filter_map(|branch| {
-            let commit = repository.find_commit(branch.head).ok()?;
+            let commit = repository.find_commit(branch.head()).ok()?;
             let tree = repository
                 .find_real_tree(&commit, Default::default())
                 .ok()?;
@@ -271,7 +275,7 @@ fn compute_locks(
         .collect::<Vec<_>>();
 
     let mut workspace_hunks_by_path =
-        HashMap::<PathBuf, Vec<(gitbutler_diff::GitHunk, &Branch)>>::new();
+        HashMap::<PathBuf, Vec<(gitbutler_diff::GitHunk, &Stack)>>::new();
 
     for (branch, hunks_by_filepath) in branch_path_diffs {
         for (path, hunks) in hunks_by_filepath {
@@ -314,7 +318,7 @@ fn compute_locks(
                 .iter()
                 .map(|b| HunkLock {
                     branch_id: b.id,
-                    commit_id: b.head,
+                    commit_id: b.head(),
                 })
                 .collect::<Vec<_>>();
 

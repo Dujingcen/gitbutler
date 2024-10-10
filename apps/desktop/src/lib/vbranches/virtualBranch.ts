@@ -45,15 +45,24 @@ export class VirtualBranchService {
 				if (upstreamName) {
 					try {
 						const data = await this.remoteBranchService.getRemoteBranchData(upstreamName);
-						const commits = data.commits;
-						commits.forEach((uc) => {
+						const upstreamCommits = data.commits;
+						const stackedCommits = b.series.flatMap((series) => series.patches);
+
+						upstreamCommits.forEach((uc) => {
 							const match = b.commits.find((c) => commitCompare(uc, c));
+							const stackedMatch = stackedCommits.find((c) => commitCompare(uc, c));
 							if (match) {
 								match.relatedTo = uc;
 								uc.relatedTo = match;
 							}
+							if (stackedMatch) {
+								// This asymmetric difference is not ideal, but gets the job done while
+								// we are experimenting with stacking.
+								stackedMatch.relatedTo = uc;
+							}
 						});
-						linkAsParentChildren(commits);
+						linkAsParentChildren(upstreamCommits);
+						linkAsParentChildren(stackedCommits);
 						b.upstreamData = data;
 					} catch (e: any) {
 						console.log(e);
@@ -69,6 +78,7 @@ export class VirtualBranchService {
 		);
 
 		this.branches.set(branches);
+
 		this.branchesError.set(undefined);
 		this.logMetrics(branches);
 
@@ -97,6 +107,10 @@ export class VirtualBranchService {
 			this.projectMetrics.setMetric('locked_hunk_count', lockedHunks.length);
 			this.projectMetrics.setMetric('file_count', files.length);
 			this.projectMetrics.setMetric('virtual_branch_count', branches.length);
+			this.projectMetrics.setMetric(
+				'max_stack_count',
+				Math.max(...branches.map((b) => b.series.length))
+			);
 		} catch (err: unknown) {
 			console.error(err);
 		}

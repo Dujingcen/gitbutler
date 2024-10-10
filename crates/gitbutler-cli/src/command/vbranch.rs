@@ -1,17 +1,11 @@
 use anyhow::{bail, Result};
-use gitbutler_branch::{
-    Branch, BranchCreateRequest, BranchIdentity, BranchUpdateRequest, VirtualBranchesHandle,
-};
+use gitbutler_branch::{BranchCreateRequest, BranchIdentity, BranchUpdateRequest};
 use gitbutler_branch_actions::{get_branch_listing_details, list_branches};
 use gitbutler_command_context::CommandContext;
 use gitbutler_project::Project;
+use gitbutler_stack::{Stack, VirtualBranchesHandle};
 
 use crate::command::debug_print;
-
-pub fn update_target(project: Project) -> Result<()> {
-    let unapplied = gitbutler_branch_actions::update_base_branch(&project)?;
-    debug_print(unapplied)
-}
 
 pub fn list_all(project: Project) -> Result<()> {
     let ctx = CommandContext::open(&project)?;
@@ -79,7 +73,7 @@ pub fn set_default(project: Project, branch_name: String) -> Result<()> {
     set_default_branch(&project, &branch)
 }
 
-fn set_default_branch(project: &Project, branch: &Branch) -> Result<()> {
+fn set_default_branch(project: &Project, branch: &Stack) -> Result<()> {
     gitbutler_branch_actions::update_virtual_branch(
         project,
         BranchUpdateRequest {
@@ -144,7 +138,7 @@ pub fn commit(project: Project, branch_name: String, message: String) -> Result<
     )?)
 }
 
-pub fn branch_by_name(project: &Project, name: &str) -> Result<Branch> {
+pub fn branch_by_name(project: &Project, name: &str) -> Result<Stack> {
     let mut found: Vec<_> = VirtualBranchesHandle::new(project.gb_dir())
         .list_all_branches()?
         .into_iter()

@@ -5,7 +5,6 @@
 	import { BaseBranch } from '$lib/baseBranch/baseBranch';
 	import { transformAnyCommit } from '$lib/commitLines/transformers';
 	import InsertEmptyCommitAction from '$lib/components/InsertEmptyCommitAction.svelte';
-	import { stackingFeature } from '$lib/config/uiFeatureFlags';
 	import {
 		ReorderDropzoneManagerFactory,
 		type ReorderDropzone
@@ -13,13 +12,13 @@
 	import Dropzone from '$lib/dropzone/Dropzone.svelte';
 	import LineOverlay from '$lib/dropzone/LineOverlay.svelte';
 	import { getGitHost } from '$lib/gitHost/interface/gitHost';
-	import { getContext } from '$lib/utils/context';
-	import { getContextStore } from '$lib/utils/context';
 	import { BranchController } from '$lib/vbranches/branchController';
 	import { Commit, DetailedCommit, VirtualBranch } from '$lib/vbranches/types';
+	import { getContext } from '@gitbutler/shared/context';
+	import { getContextStore } from '@gitbutler/shared/context';
 	import Button from '@gitbutler/ui/Button.svelte';
 	import LineGroup from '@gitbutler/ui/commitLines/LineGroup.svelte';
-	import { LineManagerFactory } from '@gitbutler/ui/commitLines/lineManager';
+	import { LineManagerFactory, LineSpacer } from '@gitbutler/ui/commitLines/lineManager';
 	import type { Snippet } from 'svelte';
 	import { goto } from '$app/navigation';
 
@@ -53,14 +52,6 @@
 	const reorderDropzoneManagerFactory = getContext(ReorderDropzoneManagerFactory);
 	const gitHost = getGitHost();
 
-	// TODO: Why does eslint-svelte-plugin complain about enum?
-	// eslint-disable-next-line svelte/valid-compile
-	enum LineSpacer {
-		Remote = 'remote-spacer',
-		Local = 'local-spacer',
-		LocalAndRemote = 'local-and-remote-spacer'
-	}
-
 	const mappedRemoteCommits = $derived(
 		remoteCommits.length > 0
 			? [...remoteCommits.map(transformAnyCommit), { id: LineSpacer.Remote }]
@@ -69,9 +60,7 @@
 
 	const mappedLocalCommits = $derived(
 		localCommits.length > 0
-			? !$stackingFeature
-				? [...localCommits.map(transformAnyCommit), { id: LineSpacer.Local }]
-				: localCommits.map(transformAnyCommit)
+			? [...localCommits.map(transformAnyCommit), { id: LineSpacer.Local }]
 			: []
 	);
 	const mappedLocalAndRemoteCommits = $derived(
@@ -148,7 +137,7 @@
 {/snippet}
 
 {#if hasCommits || hasRemoteCommits}
-	<div class="commits" class:stacked={$stackingFeature}>
+	<div class="commits">
 		<!-- UPSTREAM COMMITS -->
 
 		{#if remoteCommits.length > 0}
@@ -199,10 +188,7 @@
 		<!-- LOCAL COMMITS -->
 		{#if localCommits.length > 0}
 			<div class="commits-group">
-				<InsertEmptyCommitAction
-					isFirst
-					on:click={() => insertBlankCommit($branch.head, 'above')}
-				/>
+				<InsertEmptyCommitAction isFirst onclick={() => insertBlankCommit($branch.head, 'above')} />
 				{@render reorderDropzone(
 					reorderDropzoneManager.topDropzone,
 					getReorderDropzoneOffset({ isFirst: true })
@@ -232,10 +218,10 @@
 
 					<InsertEmptyCommitAction
 						isLast={idx + 1 === localCommits.length}
-						on:click={() => insertBlankCommit(commit.id, 'below')}
+						onclick={() => insertBlankCommit(commit.id, 'below')}
 					/>
 				{/each}
-				{#if !$stackingFeature && pushButton}
+				{#if pushButton}
 					<CommitAction bottomBorder={hasRemoteCommits}>
 						{#snippet lines()}
 							<LineGroup lineGroup={lineManager.get(LineSpacer.Local)} topHeightPx={0} />
@@ -274,7 +260,7 @@
 					)}
 					<InsertEmptyCommitAction
 						isLast={idx + 1 === localAndRemoteCommits.length}
-						on:click={() => insertBlankCommit(commit.id, 'below')}
+						onclick={() => insertBlankCommit(commit.id, 'below')}
 					/>
 				{/each}
 
@@ -331,8 +317,9 @@
 					{/key}
 				</div>
 				<div class="base-row__content">
-					<span class="text-11 base-row__text"
-						>Base commit <button
+					<span class="text-11 base-row__text">
+						Base commit
+						<button
 							class="base-row__commit-link"
 							onclick={async () => await goto(`/${project.id}/base`)}
 						>
@@ -363,10 +350,6 @@
 
 		--avatar-first-top: 50px;
 		--avatar-top: 16px;
-	}
-
-	.commits.stacked {
-		border-top: none;
 	}
 
 	/* BASE ROW */

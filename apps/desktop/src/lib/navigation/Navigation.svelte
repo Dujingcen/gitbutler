@@ -13,8 +13,8 @@
 	import { persisted } from '$lib/persisted/persisted';
 	import { platformName } from '$lib/platform/platform';
 	import { SETTINGS, type Settings } from '$lib/settings/userSettings';
-	import { getContext, getContextStoreBySymbol } from '$lib/utils/context';
 	import { createKeybind } from '$lib/utils/hotkeys';
+	import { getContext, getContextStoreBySymbol } from '@gitbutler/shared/context';
 	import { env } from '$env/dynamic/public';
 
 	const minResizerWidth = 280;
@@ -30,8 +30,7 @@
 	let isResizerHovered = false;
 	let isResizerDragging = false;
 
-	// eslint-disable-next-line svelte/valid-compile
-	$: isNavCollapsed = persisted<boolean>(false, 'projectNavCollapsed_' + project.id);
+	const isNavCollapsed = persisted<boolean>(false, 'projectNavCollapsed_' + project.id);
 
 	function toggleNavCollapse() {
 		$isNavCollapsed = !$isNavCollapsed;

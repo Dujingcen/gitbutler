@@ -1,5 +1,4 @@
 <script lang="ts">
-	import EmptyStatePlaceholder from '../components/EmptyStatePlaceholder.svelte';
 	import FullviewLoading from '../components/FullviewLoading.svelte';
 	import LazyloadContainer from '../shared/LazyloadContainer.svelte';
 	import emptyFolderSvg from '$lib/assets/empty-state/empty-folder.svg?raw';
@@ -9,9 +8,10 @@
 	import SnapshotCard from '$lib/history/SnapshotCard.svelte';
 	import { HistoryService, createdOnDay } from '$lib/history/history';
 	import ScrollableContainer from '$lib/scroll/ScrollableContainer.svelte';
-	import { getContext } from '$lib/utils/context';
 	import { RemoteFile } from '$lib/vbranches/types';
+	import { getContext } from '@gitbutler/shared/context';
 	import Button from '@gitbutler/ui/Button.svelte';
+	import EmptyStatePlaceholder from '@gitbutler/ui/EmptyStatePlaceholder.svelte';
 	import Icon from '@gitbutler/ui/Icon.svelte';
 	import { plainToInstance } from 'class-transformer';
 	import { createEventDispatcher } from 'svelte';
@@ -126,12 +126,14 @@
 
 			<!-- EMPTY STATE -->
 			{#if $snapshots.length === 0 && !$loading}
-				<EmptyStatePlaceholder image={emptyFolderSvg}>
-					<svelte:fragment slot="title">No snapshots yet</svelte:fragment>
-					<svelte:fragment slot="caption">
+				<EmptyStatePlaceholder image={emptyFolderSvg} bottomMargin={48}>
+					{#snippet title()}
+						No snapshots yet
+					{/snippet}
+					{#snippet caption()}
 						Gitbutler saves your work, including file changes, so your progress is always secure.
 						Adjust snapshot settings in project settings.
-					</svelte:fragment>
+					{/snippet}
 				</EmptyStatePlaceholder>
 			{/if}
 

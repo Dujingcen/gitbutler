@@ -4,8 +4,10 @@ import * as toasts from '$lib/utils/toasts';
 import posthog from 'posthog-js';
 import type { BaseBranchService } from '$lib/baseBranch/baseBranchService';
 import type { RemoteBranchService } from '$lib/stores/remoteBranches';
-import type { Hunk, LocalFile } from './types';
+import type { BranchPushResult, Hunk, LocalFile } from './types';
 import type { VirtualBranchService } from './virtualBranch';
+
+export type CommitIdOrChangeId = { CommitId: string } | { ChangeId: string };
 
 export class BranchController {
 	constructor(
@@ -93,6 +95,50 @@ export class BranchController {
 			});
 		} catch (err) {
 			showError('Failed to update branch name', err);
+		}
+	}
+
+	async createPatchSeries(
+		branchId: string,
+		referenceName: string,
+		commitIdOrChangeId?: CommitIdOrChangeId
+	) {
+		try {
+			await invoke<void>('create_series', {
+				projectId: this.projectId,
+				branchId: branchId,
+				request: {
+					target_patch: commitIdOrChangeId,
+					name: referenceName
+				}
+			});
+		} catch (err) {
+			showError('Failed to create branch reference', err);
+		}
+	}
+
+	async removePatchSeries(branchId: string, name: string) {
+		try {
+			await invoke<void>('remove_series', {
+				projectId: this.projectId,
+				branchId,
+				headName: name
+			});
+		} catch (err) {
+			showError('Failed remove series', err);
+		}
+	}
+
+	async updateSeriesName(branchId: string, headName: string, newHeadName: string) {
+		try {
+			await invoke<void>('update_series_name', {
+				projectId: this.projectId,
+				branchId,
+				headName,
+				newHeadName
+			});
+		} catch (err) {
+			showError('Failed to update remote name', err);
 		}
 	}
 
@@ -261,16 +307,21 @@ export class BranchController {
 		}
 	}
 
-	async pushBranch(branchId: string, withForce: boolean): Promise<string> {
+	async pushBranch(
+		branchId: string,
+		withForce: boolean,
+		stack: boolean = false
+	): Promise<BranchPushResult | undefined> {
 		try {
-			const upstreamRef = await invoke<string>('push_virtual_branch', {
+			const command = stack ? 'push_stack' : 'push_virtual_branch';
+			const pushResult = await invoke<BranchPushResult | undefined>(command, {
 				projectId: this.projectId,
 				branchId,
 				withForce
 			});
 			posthog.capture('Push Successful');
 			await this.vbranchService.refresh();
-			return upstreamRef;
+			return pushResult;
 		} catch (err: any) {
 			console.error(err);
 			const { code, message } = err;
@@ -317,24 +368,6 @@ export class BranchController {
 			showError('Failed to unapply branch', err);
 		} finally {
 			this.remoteBranchService.refresh();
-		}
-	}
-
-	async updateBaseBranch(): Promise<string | undefined> {
-		try {
-			const stashedConflicting = await invoke<string[]>('update_base_branch', {
-				projectId: this.projectId
-			});
-			const branchRefPrefix = 'refs/heads/';
-			if (stashedConflicting.length > 0) {
-				return `The following branches were stashed due to a merge conflict during updating the workspace: \n\n \
-${stashedConflicting.map((branch) => branch.split(branchRefPrefix)[1]).join('\n')} \n\n \
-You can find them in the 'Branches' sidebar in order to resolve conflicts.`;
-			} else {
-				return undefined;
-			}
-		} finally {
-			this.baseBranchService.refresh();
 		}
 	}
 

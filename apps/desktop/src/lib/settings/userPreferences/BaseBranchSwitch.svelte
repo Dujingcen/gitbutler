@@ -6,9 +6,9 @@
 	import Select from '$lib/select/Select.svelte';
 	import SelectItem from '$lib/select/SelectItem.svelte';
 	import InfoMessage from '$lib/shared/InfoMessage.svelte';
-	import { getContext, getContextStore } from '$lib/utils/context';
 	import { BranchController } from '$lib/vbranches/branchController';
 	import { VirtualBranchService } from '$lib/vbranches/virtualBranch';
+	import { getContext, getContextStore } from '@gitbutler/shared/context';
 	import Button from '@gitbutler/ui/Button.svelte';
 
 	const baseBranch = getContextStore(BaseBranch);
@@ -84,7 +84,7 @@
 			{#if uniqueRemotes(remoteBranches).length > 1}
 				<Select
 					value={selectedRemote.name}
-					options={uniqueRemotes(remoteBranches).map((r) => ({ label: r.name!, value: r.name!}))}
+					options={uniqueRemotes(remoteBranches).map((r) => ({ label: r.name!, value: r.name! }))}
 					onselect={(value) => {
 						selectedRemote = { name: value };
 					}}

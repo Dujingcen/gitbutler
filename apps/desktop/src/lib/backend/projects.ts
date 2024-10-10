@@ -5,7 +5,7 @@ import * as toasts from '$lib/utils/toasts';
 import { open } from '@tauri-apps/api/dialog';
 import { plainToInstance } from 'class-transformer';
 import { get, writable } from 'svelte/store';
-import type { HttpClient } from './httpClient';
+import type { HttpClient } from '@gitbutler/shared/httpClient';
 import { goto } from '$app/navigation';
 
 export type KeyType = 'gitCredentialsHelper' | 'local' | 'systemExecutable';
@@ -31,14 +31,6 @@ export class Project {
 		hostType: 'github' | 'gitlab' | 'bitbucket' | 'azure';
 		pullRequestTemplatePath: string;
 	};
-
-	private succeeding_rebases!: boolean;
-	get succeedingRebases() {
-		return this.succeeding_rebases;
-	}
-	set succeedingRebases(value) {
-		this.succeeding_rebases = value;
-	}
 
 	// Produced just for the frontend to determine if the project is open in any window.
 	is_open!: boolean;
@@ -158,25 +150,21 @@ export class ProjectService {
 		return path;
 	}
 
-	validateProjectPath(path: string, showErrors = true) {
+	validateProjectPath(path: string) {
 		if (/^\\\\wsl.localhost/i.test(path)) {
-			if (showErrors) {
-				showError(
-					'Use the Linux version of GitButler',
-					'For WSL2 projects, install the Linux version of GitButler inside of your WSL2 distro'
-				);
-			}
+			const errorMsg =
+				'For WSL2 projects, install the Linux version of GitButler inside of your WSL2 distro';
+			console.error(errorMsg);
+			showError('Use the Linux version of GitButler', errorMsg);
 
 			return false;
 		}
 
 		if (/^\\\\/i.test(path)) {
-			if (showErrors) {
-				showError(
-					'UNC Paths are not directly supported',
-					'Using git across a network is not recommended. Either clone the repo locally, or use the NET USE command to map a network drive'
-				);
-			}
+			const errorMsg =
+				'Using git across a network is not recommended. Either clone the repo locally, or use the NET USE command to map a network drive';
+			console.error(errorMsg);
+			showError('UNC Paths are not directly supported', errorMsg);
 
 			return false;
 		}

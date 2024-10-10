@@ -1,14 +1,21 @@
 <script lang="ts">
-	// import { Project } from '$lib/backend/projects';
-	import ActionView from '$lib/layout/ActionView.svelte';
+	import { Project } from '$lib/backend/projects';
+	import { CommitService } from '$lib/commits/service';
+	import { conflictEntryHint, type ConflictEntryPresence } from '$lib/conflictEntryPresence';
+	import { editor } from '$lib/editorLink/editorLink';
+	import FileContextMenu from '$lib/file/FileContextMenu.svelte';
 	import { ModeService, type EditModeMetadata } from '$lib/modes/service';
+	import ScrollableContainer from '$lib/scroll/ScrollableContainer.svelte';
 	import { UncommitedFilesWatcher } from '$lib/uncommitedFiles/watcher';
-	import { getContext } from '$lib/utils/context';
+	import { openExternalUrl } from '$lib/utils/url';
+	import { Commit, type RemoteFile } from '$lib/vbranches/types';
+	import { getContext } from '@gitbutler/shared/context';
+	import Badge from '@gitbutler/ui/Badge.svelte';
 	import Button from '@gitbutler/ui/Button.svelte';
 	import InfoButton from '@gitbutler/ui/InfoButton.svelte';
 	import Avatar from '@gitbutler/ui/avatar/Avatar.svelte';
 	import FileListItem from '@gitbutler/ui/file/FileListItem.svelte';
-	import type { RemoteFile } from '$lib/vbranches/types';
+	import { join } from '@tauri-apps/api/path';
 	import type { FileStatus } from '@gitbutler/ui/file/types';
 
 	interface Props {
@@ -17,7 +24,8 @@
 
 	const { editModeMetadata }: Props = $props();
 
-	// const project = getContext(Project);
+	const project = getContext(Project);
+	const remoteCommitService = getContext(CommitService);
 	const uncommitedFileWatcher = getContext(UncommitedFilesWatcher);
 	const modeService = getContext(ModeService);
 
@@ -26,7 +34,11 @@
 	let modeServiceAborting = $state<'inert' | 'loading' | 'completed'>('inert');
 	let modeServiceSaving = $state<'inert' | 'loading' | 'completed'>('inert');
 
-	let initialFiles = $state<RemoteFile[]>([]);
+	let initialFiles = $state<[RemoteFile, ConflictEntryPresence | undefined][]>([]);
+	let commit = $state<Commit | undefined>(undefined);
+
+	let filesList = $state<HTMLDivElement | undefined>(undefined);
+	let contextMenu = $state<FileContextMenu | undefined>(undefined);
 
 	$effect(() => {
 		modeService.getInitialIndexState().then((files) => {
@@ -34,10 +46,17 @@
 		});
 	});
 
+	$effect(() => {
+		remoteCommitService.find(editModeMetadata.commitOid).then((maybeCommit) => {
+			commit = maybeCommit;
+		});
+	});
+
 	interface FileEntry {
 		name: string;
 		path: string;
 		conflicted: boolean;
+		conflictHint?: string;
 		status?: FileStatus;
 	}
 
@@ -48,7 +67,7 @@
 
 		// Build maps of files
 		{
-			initialFiles.forEach((initialFile) => {
+			initialFiles.forEach(([initialFile]) => {
 				initialFileMap.set(initialFile.path, initialFile);
 			});
 
@@ -59,47 +78,70 @@
 
 		// Create output
 		{
-			initialFiles.forEach((initialFile) => {
+			initialFiles.forEach(([initialFile, conflictEntryPresence]) => {
 				const isDeleted = uncommitedFileMap.has(initialFile.path);
+
+				if (conflictEntryPresence) {
+					console.log(initialFile.path, conflictEntryPresence);
+				}
 
 				outputMap.set(initialFile.path, {
 					name: initialFile.filename,
 					path: initialFile.path,
-					conflicted: initialFile.looksConflicted,
-					status: isDeleted ? undefined : 'D'
+					conflicted: !!conflictEntryPresence,
+					conflictHint: conflictEntryPresence
+						? conflictEntryHint(conflictEntryPresence)
+						: undefined,
+					status: isDeleted || !!conflictEntryPresence ? undefined : 'D'
 				});
 			});
 
 			$uncommitedFiles.forEach(([uncommitedFile]) => {
-				const initialFile = initialFileMap.get(uncommitedFile.path);
-				if (initialFile) {
-					const fileChanged = initialFile.hunks.some(
+				const existingFile = initialFileMap.get(uncommitedFile.path);
+
+				if (existingFile) {
+					const fileChanged = existingFile.hunks.some(
 						(hunk) => !uncommitedFile.hunks.map((hunk) => hunk.diff).includes(hunk.diff)
 					);
 
-					if (fileChanged && !uncommitedFile.looksConflicted) {
+					if (fileChanged) {
 						// All initial entries should have been added to the map,
-						// so we can safly assert that it will be present
+						// so we can safely assert that it will be present
 						const outputFile = outputMap.get(uncommitedFile.path)!;
-						outputFile.status = 'M';
-						outputFile.conflicted = false;
+						if (!outputFile.conflicted) {
+							outputFile.status = 'M';
+						}
+						return;
 					}
-				} else {
-					outputMap.set(uncommitedFile.path, {
-						name: uncommitedFile.filename,
-						path: uncommitedFile.path,
-						conflicted: false,
-						status: 'A'
-					});
+
+					return;
 				}
+
+				outputMap.set(uncommitedFile.path, {
+					name: uncommitedFile.filename,
+					path: uncommitedFile.path,
+					conflicted: false,
+					status: 'A'
+				});
 			});
 		}
 
-		const files = Array.from(outputMap.values());
-		files.sort((a, b) => a.path.localeCompare(b.path));
+		const orderedOutput = Array.from(outputMap.values());
+		orderedOutput.sort((a, b) => {
+			// Float conflicted files to the top
+			if (a.conflicted && !b.conflicted) {
+				return -1;
+			} else if (!a.conflicted && b.conflicted) {
+				return 1;
+			}
 
-		return files;
+			return a.path.localeCompare(b.path);
+		});
+
+		return orderedOutput;
 	});
+
+	const conflictedFiles = $derived(files.filter((file) => file.conflicted));
 
 	async function abort() {
 		modeServiceAborting = 'loading';
@@ -116,13 +158,16 @@
 
 		modeServiceSaving = 'completed';
 	}
+
+	async function openAllConflictedFiles() {
+		for (const file of conflictedFiles) {
+			const absPath = await join(project.vscodePath, file.path);
+			openExternalUrl(`${$editor}://file${absPath}`);
+		}
+	}
 </script>
 
-<ActionView
-	paddings={{
-		left: 48
-	}}
->
+<div class="editmode__container">
 	<h2 class="editmode__title text-18 text-body text-bold">
 		You are editing commit <span class="code-string">
 			{editModeMetadata.commitOid.slice(0, 7)}
@@ -134,56 +179,83 @@
 	</h2>
 
 	<div class="commit-group">
-		<div class="commit-line__container">
-			<div class="commit-line__top-line"></div>
-			<div class="commit-line__avatar">
-				<Avatar srcUrl="oops" tooltip="author" />
-			</div>
-			<div class="commit-line__bottom-line"></div>
-		</div>
+		<div class="card commit-card">
+			<h3 class="text-13 text-semibold commit-card__title">
+				{commit?.descriptionTitle || 'Undefined commit'}
+			</h3>
 
-		<div class="commit-data">
-			<div class="card commit-card">
-				<h3 class="text-13 text-semibold commit-card__title">Awesome title</h3>
+			{#if commit}
 				<div class="text-11 commit-card__details">
+					{#if commit.author.gravatarUrl && commit.author.email}
+						<Avatar srcUrl={commit.author.gravatarUrl} tooltip={commit.author.email} />
+						<span class="commit-card__divider">•</span>
+					{/if}
 					<span class="">{editModeMetadata.commitOid.slice(0, 7)}</span>
 					<span class="commit-card__divider">•</span>
-					<span class="">Author</span>
+					<span class="">{commit.author.name}</span>
 				</div>
+			{/if}
 
-				<div class="commit-card__type-indicator"></div>
+			<div class="commit-card__type-indicator"></div>
+		</div>
+
+		<div bind:this={filesList} class="card files">
+			<div class="header">
+				<h3 class="text-13 text-semibold">Commit files</h3>
+				<Badge label={files.length} />
 			</div>
-
-			<div class="card files">
-				<h3 class="text-13 text-semibold header">Commit files</h3>
-				{#each files as file}
+			<ScrollableContainer>
+				{#each files as file (file.path)}
 					<div class="file">
 						<FileListItem
-							fileName={file.name}
 							filePath={file.path}
 							fileStatus={file.status}
 							conflicted={file.conflicted}
+							conflictHint={file.conflictHint}
 							fileStatusStyle={file.status === 'M' ? 'full' : 'dot'}
-							clickable={false}
+							onclick={(e) => {
+								contextMenu?.open(e, { files: [file] });
+							}}
+							oncontextmenu={(e) => {
+								contextMenu?.open(e, { files: [file] });
+							}}
 						/>
 					</div>
 				{/each}
-			</div>
+			</ScrollableContainer>
 		</div>
 	</div>
 
-	<!-- <div class="editmode__helpbox"> -->
+	<FileContextMenu
+		bind:this={contextMenu}
+		target={filesList}
+		isUnapplied={false}
+		branchId={undefined}
+	/>
+
 	<p class="text-12 text-body editmode__helptext">
 		Please don't make any commits while in edit mode.
 		<br />
 		To exit edit mode, use the provided actions.
 	</p>
-	<!-- </div> -->
 
 	<div class="editmode__actions">
 		<Button style="ghost" outline onclick={abort} disabled={modeServiceAborting === 'loading'}>
 			Cancel
 		</Button>
+		{#if conflictedFiles.length > 0}
+			<Button
+				style="neutral"
+				kind="solid"
+				onclick={openAllConflictedFiles}
+				icon="open-link"
+				tooltip={conflictedFiles.length === 1
+					? 'Open the conflicted file in your editor'
+					: 'Open all files with conflicts in your editor'}
+			>
+				Open conflicted files
+			</Button>
+		{/if}
 		<Button
 			style="pop"
 			kind="solid"
@@ -194,9 +266,21 @@
 			Save and exit
 		</Button>
 	</div>
-</ActionView>
+</div>
 
 <style lang="postcss">
+	.editmode__container {
+		--side-padding: 40px;
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		margin: 0 auto;
+		padding: 40px var(--side-padding) 24px;
+		overflow: hidden;
+		width: 100%;
+		max-width: calc(520px + 2 * var(--side-padding));
+	}
+
 	.editmode__title {
 		color: var(--clr-text-1);
 		margin-bottom: 12px;
@@ -211,14 +295,18 @@
 	}
 
 	.files {
+		flex: 1;
 		margin-bottom: 12px;
 		overflow: hidden;
 		padding-bottom: 8px;
 
 		& .header {
-			margin-left: 16px;
-			margin-top: 16px;
-			margin-bottom: 8px;
+			display: flex;
+			align-items: center;
+			gap: 4px;
+			padding-left: 16px;
+			padding-top: 16px;
+			padding-bottom: 8px;
 		}
 
 		& .file {
@@ -237,22 +325,16 @@
 	.commit-group {
 		position: relative;
 		display: flex;
-		gap: 14px;
-	}
-
-	.commit-data {
-		position: relative;
-		display: flex;
 		flex-direction: column;
 		gap: 4px;
-		width: 100%;
+		overflow: hidden;
 	}
 
 	/* COMMIT CARD */
 	.commit-card {
 		position: relative;
 		padding: 14px 14px 14px 16px;
-		gap: 6px;
+		gap: 8px;
 		overflow: hidden;
 	}
 
@@ -274,47 +356,6 @@
 		height: 100%;
 		background-color: var(--clr-commit-local);
 	}
-
-	/* COMMIT LINE */
-	.commit-line__container {
-		position: absolute;
-		top: 0;
-		left: -26px;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		height: 100%;
-	}
-
-	.commit-line__avatar {
-		position: absolute;
-		top: 15px;
-		left: 50%;
-		transform: translateX(-50%);
-		border: 2px solid var(--clr-commit-local);
-		border-radius: 50%;
-	}
-
-	.commit-line__top-line {
-		width: 2px;
-		height: 48px;
-		margin-top: -26px;
-		background: linear-gradient(180deg, transparent 0%, var(--clr-commit-local) 100%);
-	}
-
-	.commit-line__bottom-line {
-		width: 2px;
-		height: 100%;
-		background: linear-gradient(180deg, var(--clr-commit-local) 0%, transparent 100%);
-	}
-
-	/* .editmode__helpbox {
-		color: var(--clr-text-2);
-		margin-bottom: 16px;
-		padding: 12px;
-		border-radius: var(--radius-m);
-		background-color: var(--clr-bg-1-muted);
-	} */
 
 	.editmode__helptext {
 		color: var(--clr-text-3);
